@@ -106,7 +106,7 @@ class _TVCardState extends State<TVCard> with SingleTickerProviderStateMixin {
                           color: Theme.of(context)
                               .colorScheme
                               .primary
-                              .withOpacity(0.3),
+                              .withValues(alpha: 0.3),
                           blurRadius: 12,
                           spreadRadius: 2,
                         ),

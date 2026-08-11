@@ -2,9 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
-import 'package:get/get.dart';
-import 'package:qr_flutter/qr_flutter.dart';
+import 'package:flutter/foundation.dart';
 
 /// TV Remote Configuration Server
 /// Provides a web interface accessible from mobile devices to:

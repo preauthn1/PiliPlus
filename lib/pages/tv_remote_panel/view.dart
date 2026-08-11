@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:get/get.dart';
 import 'package:PiliPlus/services/tv_remote_server.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -148,7 +147,7 @@ class _TVRemotePanelState extends State<TVRemotePanel> {
                 color: const Color(0xFF161D2B),
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(
-                  color: const Color(0xFF38BDF8).withOpacity(0.3),
+                  color: const Color(0xFF38BDF8).withValues(alpha: 0.3),
                   width: 2,
                 ),
               ),
@@ -205,7 +204,7 @@ class _TVRemotePanelState extends State<TVRemotePanel> {
             width: 56,
             height: 56,
             decoration: BoxDecoration(
-              color: const Color(0xFF38BDF8).withOpacity(0.1),
+              color: const Color(0xFF38BDF8).withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Icon(
