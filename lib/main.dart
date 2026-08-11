@@ -112,7 +112,18 @@ void main() async {
   HttpOverrides.global = _CustomHttpOverrides();
 
   if (PlatformUtils.isMobile) {
-    if (Platform.isAndroid) MaxScreenSize.init();
+    if (Platform.isAndroid) {
+      MaxScreenSize.init();
+      // Detect Android TV
+      try {
+        const platform = MethodChannel('com.example.piliplus/platform');
+        final bool isTV = await platform.invokeMethod('isAndroidTV');
+        PlatformUtils.setAndroidTV(isTV);
+        if (kDebugMode) debugPrint('Android TV detected: $isTV');
+      } catch (e) {
+        if (kDebugMode) debugPrint('TV detection error: $e');
+      }
+    }
     await Future.wait([
       if (Pref.horizontalScreen) ?fullMode() else ?portraitUpMode(),
       setupServiceLocator(),
