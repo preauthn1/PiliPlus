@@ -84,6 +84,32 @@ Widget build(BuildContext context) {
 }
 ```
 
+## 手机遥控器
+
+TV 端启动后会自动开启 HTTP 服务器（端口 8888），手机访问即可控制电视。
+
+### 连接方式
+
+1. **扫码连接**：TV 端进入「设置 → TV 遥控器」，手机扫描二维码
+2. **手动输入**：浏览器访问 `http://<TV的IP>:8888`
+
+### 功能
+
+- **登录**：扫描 B站登录二维码，TV 端自动同步
+- **设置**：调整音量、画质、弹幕等
+- **控制**：播放/暂停、快进快退、返回
+
+### API 端点
+
+```bash
+GET  /                  # Web UI
+GET  /api/status        # 服务状态
+GET  /api/login/qr      # 登录二维码
+GET  /api/settings      # 当前设置
+POST /api/settings      # 更新设置
+POST /api/control       # 控制指令
+```
+
 ## 构建和测试
 
 ### 构建 TV APK
