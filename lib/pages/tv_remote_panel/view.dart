@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:PiliPlus/services/tv_remote_bridge.dart';
 import 'package:PiliPlus/services/tv_remote_server.dart';
-import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 /// TV Remote Control Panel
@@ -21,9 +20,7 @@ class _TVRemotePanelState extends State<TVRemotePanel> {
   @override
   void initState() {
     super.initState();
-    if (PlatformUtils.isTV) {
-      _startServer();
-    }
+    _startServer();
   }
 
   Future<void> _startServer() async {
@@ -64,14 +61,6 @@ class _TVRemotePanelState extends State<TVRemotePanel> {
 
   @override
   Widget build(BuildContext context) {
-    if (!PlatformUtils.isTV) {
-      return const Scaffold(
-        body: Center(
-          child: Text('此功能仅在 Android TV 上可用'),
-        ),
-      );
-    }
-
     return Scaffold(
       backgroundColor: const Color(0xFF0A0D12),
       appBar: AppBar(

@@ -127,6 +127,10 @@ void main() async {
         PlatformUtils.setAndroidTV(false);
         if (kDebugMode) debugPrint('TV detection error: $e');
       }
+      // Detection is unreliable on many boxes; honour the manual override.
+      if (Pref.forceDpadMode) {
+        PlatformUtils.setForceDpad(true);
+      }
     }
     await Future.wait([
       // TVs are always landscape and must never be pinned to portraitUp.
@@ -347,7 +351,10 @@ class MyApp extends StatelessWidget {
         child: child,
       );
     }
-    if (PlatformUtils.isTV) {
+    // Always mount: TVFocusScope decides internally, and must be able to
+    // observe D-Pad keys even when device detection said "not a TV".
+    // It is inert on touch devices.
+    if (PlatformUtils.isMobile) {
       return TVFocusScope(child: child);
     }
     return child;

@@ -54,13 +54,23 @@ import 'package:get/get.dart';
 import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
 
 List<SettingsModel> get extraSettings => [
-  if (PlatformUtils.isTV)
+  // Always visible on Android: TV detection is unreliable, so the user must
+  // be able to turn remote/D-Pad mode on themselves.
+  if (Platform.isAndroid) ...[
+    SwitchModel(
+      title: '电视遥控模式',
+      subtitle: '强制启用方向键导航与焦点高亮（电视盒子识别失败时打开）',
+      leading: const Icon(Icons.settings_remote),
+      setKey: SettingBoxKey.forceDpadMode,
+      onChanged: PlatformUtils.setForceDpad,
+    ),
     NormalModel(
       title: '手机遥控',
       subtitle: '用手机浏览器扫码控制电视',
-      leading: const Icon(Icons.settings_remote),
+      leading: const Icon(Icons.phonelink),
       onTap: (context, setState) => Get.toNamed('/tvRemote'),
     ),
+  ],
   if (PlatformUtils.isDesktop) ...[
     SwitchModel(
       title: '退出时最小化',

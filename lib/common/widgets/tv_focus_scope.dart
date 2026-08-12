@@ -50,13 +50,46 @@ class _TVFocusScopeState extends State<TVFocusScope> {
   @override
   void initState() {
     super.initState();
-    if (PlatformUtils.isTV) {
+    // Only pre-seed when we already believe this is a TV. Otherwise we wait
+    // for a real D-Pad key so we never steal focus on a phone.
+    if (PlatformUtils.dpadMode) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _seedFocus());
+    }
+    PlatformUtils.dpadModeNotifier.addListener(_onDpadModeChanged);
+    // Observe keys BEFORE the focus/shortcut system consumes them.
+    //
+    // Focus.onKeyEvent only fires along the focused node's ancestor chain,
+    // and arrow keys are consumed by Shortcuts/DirectionalFocusAction before
+    // they ever bubble up here. That meant D-Pad presses were invisible to
+    // us and remote mode could never auto-enable. A raw global handler sees
+    // every key regardless of focus state.
+    HardwareKeyboard.instance.addHandler(_globalKeyProbe);
+  }
+
+  /// Passive probe: never consumes a key, only records evidence that a
+  /// physical D-Pad is in use.
+  bool _globalKeyProbe(KeyEvent event) {
+    if (event is KeyDownEvent &&
+        _isDpadEvidence(event.logicalKey) &&
+        !PlatformUtils.dpadMode) {
+      PlatformUtils.reportDpadKey();
+    }
+    return false; // always let the event continue
+  }
+
+  void _onDpadModeChanged() {
+    if (!mounted) return;
+    setState(() {});
+    if (PlatformUtils.dpadMode) {
+      _seedAttempts = 0;
       WidgetsBinding.instance.addPostFrameCallback((_) => _seedFocus());
     }
   }
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_globalKeyProbe);
+    PlatformUtils.dpadModeNotifier.removeListener(_onDpadModeChanged);
     _rootNode.dispose();
     super.dispose();
   }
@@ -118,20 +151,41 @@ class _TVFocusScopeState extends State<TVFocusScope> {
     }
   }
 
-  static bool _isNavigationKey(LogicalKeyboardKey key) =>
+  /// Keys that prove a physical remote / D-Pad is driving the app.
+  ///
+  /// Deliberately excludes `enter`, which a Bluetooth keyboard on a phone
+  /// would also send, to avoid switching a phone into TV styling.
+  static bool _isDpadEvidence(LogicalKeyboardKey key) =>
       key == LogicalKeyboardKey.arrowUp ||
       key == LogicalKeyboardKey.arrowDown ||
       key == LogicalKeyboardKey.arrowLeft ||
       key == LogicalKeyboardKey.arrowRight ||
       key == LogicalKeyboardKey.select ||
-      key == LogicalKeyboardKey.enter ||
       key == LogicalKeyboardKey.gameButtonA;
+
+  static bool _isNavigationKey(LogicalKeyboardKey key) =>
+      _isDpadEvidence(key) || key == LogicalKeyboardKey.enter;
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
     final key = event.logicalKey;
+
+    // GROUND TRUTH: a real D-Pad key just arrived, so this *is* a remote,
+    // whatever the device claimed during detection. Device probing fails on
+    // many CN TV boxes (UI mode NORMAL, no FEATURE_LEANBACK, touchscreen
+    // still advertised), which previously left every TV feature disabled and
+    // the remote apparently dead.
+    if (_isDpadEvidence(key) && !PlatformUtils.dpadMode) {
+      PlatformUtils.reportDpadKey();
+      // Focus is almost certainly empty at this point; seed it and consume
+      // this press so the next one moves.
+      if (_focusIsEmpty) {
+        _seedFocus();
+        return KeyEventResult.handled;
+      }
+    }
 
     // Nothing focused: re-seed and consume this press so the *next* one moves.
     // This is what turns a "dead" remote into a working one after any route
@@ -184,9 +238,14 @@ class _TVFocusScopeState extends State<TVFocusScope> {
 
   @override
   Widget build(BuildContext context) {
-    if (!PlatformUtils.isTV) {
-      return widget.child;
-    }
+    // NOTE: we must ALWAYS install the key listener, even when we do not
+    // (yet) believe this is a TV. Previously this returned `widget.child`
+    // whenever detection said "not a TV", so on any box where detection
+    // failed the listener never existed, D-Pad keys were never observed, and
+    // the remote was permanently dead with no way to recover.
+    //
+    // The listener is passive on phones: it only reacts to D-Pad keycodes,
+    // which a touch device never sends.
     return FocusTraversalGroup(
       // Same ordering as Flutter's default (which already provides
       // directional traversal), but with a crash-safe focus request.

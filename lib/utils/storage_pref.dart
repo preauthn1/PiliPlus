@@ -617,10 +617,13 @@ abstract final class Pref {
   static bool get optTabletNav =>
       _setting.get(SettingBoxKey.optTabletNav, defaultValue: true);
 
+  static bool get forceDpadMode =>
+      _setting.get(SettingBoxKey.forceDpadMode, defaultValue: false);
+
   static bool get horizontalScreen {
-    // A TV is always landscape; never let the tablet heuristic pin it
-    // to portrait layout/orientation.
-    if (PlatformUtils.isTV) {
+    // A TV / D-Pad device is always landscape; never let the tablet
+    // heuristic pin it to portrait layout/orientation.
+    if (PlatformUtils.dpadMode) {
       return true;
     }
     bool? horizontalScreen = _setting.get(SettingBoxKey.horizontalScreen);

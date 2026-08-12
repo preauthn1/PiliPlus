@@ -29,6 +29,22 @@ class TVFocusHighlight extends StatefulWidget {
 class _TVFocusHighlightState extends State<TVFocusHighlight> {
   bool _focused = false;
 
+  @override
+  void initState() {
+    super.initState();
+    PlatformUtils.dpadModeNotifier.addListener(_onDpadModeChanged);
+  }
+
+  @override
+  void dispose() {
+    PlatformUtils.dpadModeNotifier.removeListener(_onDpadModeChanged);
+    super.dispose();
+  }
+
+  void _onDpadModeChanged() {
+    if (mounted) setState(() {});
+  }
+
   void _onFocusChange(bool value) {
     if (_focused != value && mounted) {
       setState(() => _focused = value);
@@ -37,8 +53,8 @@ class _TVFocusHighlightState extends State<TVFocusHighlight> {
 
   @override
   Widget build(BuildContext context) {
-    // Zero overhead on phones/tablets/desktop.
-    if (!PlatformUtils.isTV) {
+    // Zero overhead on touch devices until a real D-Pad key is seen.
+    if (!PlatformUtils.dpadMode) {
       return widget.child;
     }
 
