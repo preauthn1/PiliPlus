@@ -7,6 +7,7 @@ import 'package:PiliPlus/common/widgets/custom_toast.dart';
 import 'package:PiliPlus/common/widgets/route_aware_mixin.dart';
 import 'package:PiliPlus/common/widgets/scale_app.dart';
 import 'package:PiliPlus/common/widgets/scroll_behavior.dart';
+import 'package:PiliPlus/common/widgets/tv_focus_scope.dart';
 import 'package:PiliPlus/http/init.dart';
 import 'package:PiliPlus/models/common/theme/theme_color_type.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
@@ -114,18 +115,27 @@ void main() async {
   if (PlatformUtils.isMobile) {
     if (Platform.isAndroid) {
       MaxScreenSize.init();
-      // Detect Android TV
+      // Detect Android TV. Must complete BEFORE orientation setup below,
+      // otherwise a TV would be locked to portraitUp.
       try {
         const platform = MethodChannel('com.example.piliplus/platform');
-        final bool isTV = await platform.invokeMethod('isAndroidTV');
+        final bool isTV =
+            await platform.invokeMethod<bool>('isAndroidTV') ?? false;
         PlatformUtils.setAndroidTV(isTV);
         if (kDebugMode) debugPrint('Android TV detected: $isTV');
       } catch (e) {
+        PlatformUtils.setAndroidTV(false);
         if (kDebugMode) debugPrint('TV detection error: $e');
       }
     }
     await Future.wait([
-      if (Pref.horizontalScreen) ?fullMode() else ?portraitUpMode(),
+      // TVs are always landscape and must never be pinned to portraitUp.
+      if (PlatformUtils.isTV)
+        ?landscapeLeftMode()
+      else if (Pref.horizontalScreen)
+        ?fullMode()
+      else
+        ?portraitUpMode(),
       setupServiceLocator(),
     ]);
   } else if (Platform.isWindows) {
@@ -336,6 +346,9 @@ class MyApp extends StatelessWidget {
         onBack: _onBack,
         child: child,
       );
+    }
+    if (PlatformUtils.isTV) {
+      return TVFocusScope(child: child);
     }
     return child;
   }

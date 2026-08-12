@@ -1,7 +1,8 @@
 # PiliPlus Android TV 优化
 
 ## 概述
-本分支为 PiliPlus 添加了 Android TV 支持，使应用能在电视和机顶盒上运行并提供优化的遥控器体验。
+本分支为 PiliPlus 添加 Android TV 支持，使应用能在电视和机顶盒上运行，
+并可用物理遥控器（D-Pad）正常操作。
 
 ## 主要改动
 
@@ -13,159 +14,86 @@
 - 声明 `touchscreen` 为非必需（`required="false"`）
 - 添加 `android.software.leanback` feature 声明
 
-### 2. TV 设备检测
-**文件：** 
-- `lib/utils/platform_utils.dart` - 添加 `isTV` 和 `isAndroidTV` 检测
-- `android/app/src/main/kotlin/com/example/piliplus/MainActivity.kt` - 原生层 TV 检测
-- `lib/main.dart` - 启动时检测并设置 TV 模式
+### 2. TV 设备检测（已加固）
+**文件：**
+- `android/.../MainActivity.kt` — 原生检测
+- `lib/utils/platform_utils.dart` — `isTV` / `isAndroidTV`
+- `lib/main.dart` — 启动时检测
 
-通过 `UiModeManager` 检测设备是否为 Android TV，并通过 MethodChannel 传递给 Flutter。
+仅靠 `UiModeManager` 判断并不可靠：大量国产电视盒子/投影会返回
+`UI_MODE_TYPE_NORMAL`。现在改为多重判定，任一命中即视为 TV：
 
-```dart
-// 使用方式
-if (PlatformUtils.isTV) {
-  // TV 专用逻辑
-}
-```
+1. `UiModeManager.currentModeType == UI_MODE_TYPE_TELEVISION`
+2. `FEATURE_LEANBACK`
+3. `android.hardware.type.television`
+4. 无 `FEATURE_TOUCHSCREEN`
 
-### 3. TV 焦点组件
-**新增文件：** `lib/common/widgets/tv_card.dart`
+同时修正了时序问题：TV 检测现在**保证在方向设置之前完成**。
 
-提供 TV 优化的卡片组件，特性：
-- D-Pad 方向键导航
-- 遥控器 OK/Select 按钮处理
-- 焦点状态视觉反馈（3px 边框高亮 + 缩放动画）
-- 自动适配移动端和 TV 端（移动端不显示焦点效果）
+### 3. 方向锁定修复（关键）
+此前 `main.dart` 无条件走 `Pref.horizontalScreen ? fullMode() : portraitUpMode()`，
+而 `horizontalScreen` 默认值取自 `DeviceUtils.isTablet`——电视盒子不算平板，
+于是电视被**强制锁竖屏**，画面横躺、方向键映射错乱。
 
-### 4. 已有的键盘支持
-项目已有完善的键盘快捷键支持（`lib/pages/video/widgets/player_focus.dart`）：
-- 空格：播放/暂停
-- F：全屏切换
-- D：弹幕开关
-- M：静音
-- 方向键：音量、快进快退
-- Enter：发送弹幕
+现在：
+- `main.dart` 在 TV 上走 `landscapeLeftMode()`
+- `Pref.horizontalScreen` 在 TV 上直接返回 `true`，
+  使播放器内部横屏逻辑一致
 
-这些快捷键同样适用于 TV 遥控器，无需额外适配。
+### 4. D-Pad 焦点系统（关键）
+**新增：** `lib/common/widgets/tv_focus_scope.dart`
 
-## 使用示例
+这是「遥控器怎么按都没反应」的真正根因：应用冷启动后
+`FocusManager.primaryFocus` 为 **null**，方向键没有可遍历的起点，
+OK 键也没有作用对象，所以按任何键都毫无反应。
 
-### 包装现有组件为 TV 友好组件
+`TVFocusScope` 负责：
+- 启动后播下焦点「种子」，让 D-Pad 有起点（带重试，等异步页面构建完成）
+- 任何时刻焦点为空时，按下方向键会先重新播种并吞掉该次按键，
+  下一次按键即可正常移动——避免路由切换后再次「按不动」
+- 补充映射部分遥控器发出的 `gameButtonA`（Flutter 默认快捷键表未覆盖）
 
-```dart
-import 'package:PiliPlus/common/widgets/tv_card.dart';
+> Flutter 默认的 `ReadingOrderTraversalPolicy` 已混入
+> `DirectionalFocusTraversalPolicyMixin`，方向遍历本身可用；
+> 且 `Scrollable.ensureVisible` 会自动把获得焦点的项滚入可视区，
+> 因此无需自定义遍历策略。
 
-// 移动端组件
-Card(
-  child: VideoItem(...),
-  onTap: () => navigateToVideo(),
-)
+### 5. 焦点可见性
+**文件：** `lib/common/widgets/tv_card.dart`（`TVFocusHighlight`）、
+`lib/utils/theme_utils.dart`
 
-// TV 优化后
-TVCard(
-  autofocus: index == 0, // 首个元素自动获取焦点
-  onTap: () => navigateToVideo(),
-  child: VideoItem(...),
-)
-```
+原 `TVCard` 需要改写所有调用点，因此**从未被任何地方使用**，属于死代码。
+现改为装饰型组件 `TVFocusHighlight`，包在现有卡片外层即可，
+不创建自己的焦点节点（`canRequestFocus: false`），
+不会与内部 `InkWell` 争抢焦点或产生重复停靠点。
 
-### 条件渲染 TV UI
+已接入：`video_card_h.dart`、`video_card_v.dart`。
 
-```dart
-import 'package:PiliPlus/utils/platform_utils.dart';
+同时在主题层为 TV 设置了高对比 `focusColor`，
+使所有基于 `InkWell` 的控件获得焦点时都有明显反馈。
 
-Widget build(BuildContext context) {
-  if (PlatformUtils.isTV) {
-    // TV 专用大按钮 UI
-    return buildTVLayout();
-  }
-  // 移动端 UI
-  return buildMobileLayout();
-}
-```
+### 6. 手机遥控入口
+`/tvRemote` 路由此前只注册、无任何入口可达。现已在
+**设置 → 其他设置 → 手机遥控** 中暴露（仅 TV 可见）。
 
-## 手机遥控器
+详见 `TV_WEB_REMOTE.md`。
 
-TV 端启动后会自动开启 HTTP 服务器（端口 8888），手机访问即可控制电视。
+### 7. 已有的键盘支持
+项目已有完善的键盘快捷键（`lib/pages/video/widgets/player_focus.dart`）：
+空格播放/暂停、F 全屏、D 弹幕、M 静音、方向键音量与快进快退、Enter 发弹幕。
+这些同样适用于 TV 遥控器。
 
-### 连接方式
-
-1. **扫码连接**：TV 端进入「设置 → TV 遥控器」，手机扫描二维码
-2. **手动输入**：浏览器访问 `http://<TV的IP>:8888`
-
-### 功能
-
-- **登录**：扫描 B站登录二维码，TV 端自动同步
-- **设置**：调整音量、画质、弹幕等
-- **控制**：播放/暂停、快进快退、返回
-
-### API 端点
+## 验证
 
 ```bash
-GET  /                  # Web UI
-GET  /api/status        # 服务状态
-GET  /api/login/qr      # 登录二维码
-GET  /api/settings      # 当前设置
-POST /api/settings      # 更新设置
-POST /api/control       # 控制指令
+flutter analyze lib/          # 相对基线无新增问题
+flutter test test/tv_remote_e2e_test.dart   # 13 项端到端通过
 ```
 
-## 构建和测试
+APK 由 GitHub Actions 构建（本机内存不足以跑 release 构建）。
 
-### 构建 TV APK
-```bash
-cd /tmp/PiliPlus-clean
-flutter build apk --release
-# 或针对 ARM64
-flutter build apk --release --target-platform android-arm64
-```
+## 仍待完善
 
-### 在 Android TV 模拟器测试
-1. Android Studio 创建 TV AVD（API 28+）
-2. 运行：`flutter run`
-3. 使用模拟器的 D-Pad 控制器测试导航
-
-### 在真实设备测试
-推荐设备：
-- 小米盒子
-- NVIDIA Shield TV  
-- Google Chromecast with Google TV
-- 品牌智能电视（Android TV 系统）
-
-## 后续优化方向
-
-### 高优先级
-- [ ] 首页视频列表使用 TVCard 包装
-- [ ] 播放器界面 10ft UI 模式（更大的控制按钮）
-- [ ] 搜索界面适配遥控器输入
-- [ ] 设置界面 TV 导航优化
-
-### 中优先级
-- [ ] 登录流程 TV 适配（扫码或遥控器输入）
-- [ ] 弹幕发送界面虚拟键盘优化
-- [ ] 个人中心 TV 布局
-- [ ] 收藏夹网格布局优化
-
-### 低优先级
-- [ ] TV 专用主题色
-- [ ] 语音搜索支持（Android TV 原生）
-- [ ] 画中画模式优化
-- [ ] 多账号切换 TV UI
-
-## 兼容性
-
-- **最低 Android 版本：** Android 5.0 (API 21)
-- **推荐 Android 版本：** Android 9.0+ (API 28+)
-- **向后兼容：** 所有改动不影响现有移动端体验
-- **Flutter 版本：** 3.24.8+, Dart 3.12.0+
-
-## 参考资料
-
-- [Android TV 开发指南](https://developer.android.com/training/tv)
-- [Leanback 库文档](https://developer.android.com/reference/androidx/leanback/package-summary)
-- [Flutter TV 应用最佳实践](https://docs.flutter.dev/platform-integration/android/tv)
-
----
-
-**日期：** 2026-08-11  
-**基于版本：** PiliPlus commit e5dfc6394
+- TV 专用布局（更大字号、更宽间距、首屏栅格）尚未做，
+  当前仍复用手机布局，仅焦点与方向已可用
+- 手机端扫码登录未实现

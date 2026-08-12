@@ -1,121 +1,75 @@
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
+import 'package:flutter/material.dart';
 
-/// TV-optimized card widget with focus highlight
-class TVCard extends StatefulWidget {
-  const TVCard({
+/// Wraps a card that already contains its own focusable [InkWell] and paints
+/// a strong focus treatment when anything inside it holds focus.
+///
+/// This is a *decoration only* widget: it deliberately does not create a
+/// focusable node of its own (`canRequestFocus: false`), so it never competes
+/// with the inner InkWell for D-Pad traversal or creates duplicate stops.
+///
+/// Replaces the previous `TVCard`, which required rewriting every call site
+/// and was therefore never actually adopted anywhere in the app.
+class TVFocusHighlight extends StatefulWidget {
+  const TVFocusHighlight({
     super.key,
     required this.child,
-    this.onTap,
-    this.focusNode,
-    this.autofocus = false,
-    this.padding,
-    this.margin,
+    this.borderRadius = 12,
+    this.scale = 1.04,
   });
 
   final Widget child;
-  final VoidCallback? onTap;
-  final FocusNode? focusNode;
-  final bool autofocus;
-  final EdgeInsetsGeometry? padding;
-  final EdgeInsetsGeometry? margin;
+  final double borderRadius;
+  final double scale;
 
   @override
-  State<TVCard> createState() => _TVCardState();
+  State<TVFocusHighlight> createState() => _TVFocusHighlightState();
 }
 
-class _TVCardState extends State<TVCard> with SingleTickerProviderStateMixin {
-  late FocusNode _focusNode;
-  late AnimationController _animationController;
-  late Animation<double> _scaleAnimation;
-  bool _isFocused = false;
+class _TVFocusHighlightState extends State<TVFocusHighlight> {
+  bool _focused = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _focusNode = widget.focusNode ?? FocusNode();
-    _focusNode.addListener(_onFocusChange);
-
-    _animationController = AnimationController(
-      duration: const Duration(milliseconds: 200),
-      vsync: this,
-    );
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.05).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
-    );
-  }
-
-  @override
-  void dispose() {
-    _focusNode.removeListener(_onFocusChange);
-    if (widget.focusNode == null) {
-      _focusNode.dispose();
+  void _onFocusChange(bool value) {
+    if (_focused != value && mounted) {
+      setState(() => _focused = value);
     }
-    _animationController.dispose();
-    super.dispose();
-  }
-
-  void _onFocusChange() {
-    setState(() {
-      _isFocused = _focusNode.hasFocus;
-      if (_isFocused) {
-        _animationController.forward();
-      } else {
-        _animationController.reverse();
-      }
-    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final isTV = PlatformUtils.isTV;
-    
+    // Zero overhead on phones/tablets/desktop.
+    if (!PlatformUtils.isTV) {
+      return widget.child;
+    }
+
+    final colorScheme = Theme.of(context).colorScheme;
     return Focus(
-      focusNode: _focusNode,
-      autofocus: widget.autofocus,
-      onKeyEvent: (node, event) {
-        if (event is KeyDownEvent &&
-            (event.logicalKey == LogicalKeyboardKey.select ||
-                event.logicalKey == LogicalKeyboardKey.enter)) {
-          widget.onTap?.call();
-          return KeyEventResult.handled;
-        }
-        return KeyEventResult.ignored;
-      },
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: Container(
-          margin: widget.margin,
-          child: ScaleTransition(
-            scale: isTV ? _scaleAnimation : const AlwaysStoppedAnimation(1.0),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              padding: widget.padding ?? const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                border: isTV && _isFocused
-                    ? Border.all(
-                        color: Theme.of(context).colorScheme.primary,
-                        width: 3,
-                      )
-                    : null,
-                borderRadius: BorderRadius.circular(12),
-                boxShadow: isTV && _isFocused
-                    ? [
-                        BoxShadow(
-                          color: Theme.of(context)
-                              .colorScheme
-                              .primary
-                              .withValues(alpha: 0.3),
-                          blurRadius: 12,
-                          spreadRadius: 2,
-                        ),
-                      ]
-                    : null,
-              ),
-              child: widget.child,
+      canRequestFocus: false,
+      skipTraversal: true,
+      onFocusChange: _onFocusChange,
+      child: AnimatedScale(
+        scale: _focused ? widget.scale : 1.0,
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(widget.borderRadius),
+            border: Border.all(
+              color: _focused ? colorScheme.primary : Colors.transparent,
+              width: 3,
             ),
+            boxShadow: _focused
+                ? [
+                    BoxShadow(
+                      color: colorScheme.primary.withValues(alpha: 0.35),
+                      blurRadius: 14,
+                      spreadRadius: 1,
+                    ),
+                  ]
+                : null,
           ),
+          child: widget.child,
         ),
       ),
     );

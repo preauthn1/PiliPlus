@@ -54,6 +54,13 @@ import 'package:get/get.dart';
 import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
 
 List<SettingsModel> get extraSettings => [
+  if (PlatformUtils.isTV)
+    NormalModel(
+      title: '手机遥控',
+      subtitle: '用手机浏览器扫码控制电视',
+      leading: const Icon(Icons.settings_remote),
+      onTap: (context, setState) => Get.toNamed('/tvRemote'),
+    ),
   if (PlatformUtils.isDesktop) ...[
     SwitchModel(
       title: '退出时最小化',

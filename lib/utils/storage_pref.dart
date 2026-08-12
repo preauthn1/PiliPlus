@@ -618,6 +618,11 @@ abstract final class Pref {
       _setting.get(SettingBoxKey.optTabletNav, defaultValue: true);
 
   static bool get horizontalScreen {
+    // A TV is always landscape; never let the tablet heuristic pin it
+    // to portrait layout/orientation.
+    if (PlatformUtils.isTV) {
+      return true;
+    }
     bool? horizontalScreen = _setting.get(SettingBoxKey.horizontalScreen);
     if (horizontalScreen == null) {
       final isTablet = DeviceUtils.isTablet;

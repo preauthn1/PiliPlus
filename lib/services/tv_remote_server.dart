@@ -1,19 +1,30 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
-/// TV Remote Configuration Server
-/// Provides a web interface accessible from mobile devices to:
-/// - Login to Bilibili account (QR code or credentials)
-/// - Configure app settings
-/// - Control playback remotely
+/// TV Remote Control Server.
+///
+/// Serves a small web UI that a phone on the same LAN can open to drive the
+/// TV. Actions are published on [controlStream]; `TVRemoteBridge` subscribes
+/// and executes them.
+///
+/// Security model (v2):
+///  * bind to the LAN interface, and additionally reject any request whose
+///    remote address is not RFC1918/link-local — a public interface can no
+///    longer reach the API even if the device is exposed;
+///  * every mutating endpoint requires a 6-digit pairing code that is shown
+///    on the TV screen and rotated on each server start;
+///  * CORS is no longer `*`; only same-origin requests are accepted, so a
+///    random website the user browses cannot silently drive their TV.
 class TVRemoteServer {
   static TVRemoteServer? _instance;
   HttpServer? _server;
   int? _port;
   String? _localIP;
+  String? _pairingCode;
   final _streamController = StreamController<String>.broadcast();
 
   TVRemoteServer._();
@@ -23,7 +34,9 @@ class TVRemoteServer {
     return _instance!;
   }
 
-  /// Start the remote configuration server
+  /// 6-digit code the user must enter on their phone. Rotated per start.
+  String? get pairingCode => _pairingCode;
+
   Future<bool> start({int port = 8888}) async {
     if (_server != null) {
       debugPrint('TV Remote Server already running on port $_port');
@@ -32,6 +45,7 @@ class TVRemoteServer {
 
     try {
       _localIP = await _getLocalIP();
+      _pairingCode = _generatePairingCode();
       _server = await HttpServer.bind(InternetAddress.anyIPv4, port);
       _port = port;
 
@@ -45,30 +59,74 @@ class TVRemoteServer {
     }
   }
 
-  /// Stop the server
   Future<void> stop() async {
     await _server?.close();
     _server = null;
     _port = null;
+    _pairingCode = null;
     debugPrint('TV Remote Server stopped');
   }
 
   bool get isRunning => _server != null;
-  String? get serverURL => _localIP != null && _port != null 
-      ? 'http://$_localIP:$_port' 
-      : null;
 
-  void _handleRequest(HttpRequest request) {
+  String? get serverURL =>
+      _localIP != null && _port != null ? 'http://$_localIP:$_port' : null;
+
+  static String _generatePairingCode() {
+    final rnd = Random.secure();
+    return List.generate(6, (_) => rnd.nextInt(10)).join();
+  }
+
+  /// Only allow callers from private / link-local ranges.
+  static bool _isPrivateAddress(InternetAddress addr) {
+    if (addr.isLoopback) return true;
+    if (addr.type != InternetAddressType.IPv4) {
+      // IPv6 unique-local (fc00::/7) and link-local (fe80::/10)
+      final a = addr.address.toLowerCase();
+      return a.startsWith('fc') || a.startsWith('fd') || a.startsWith('fe80');
+    }
+    final parts = addr.address.split('.').map(int.tryParse).toList();
+    if (parts.length != 4 || parts.any((p) => p == null)) return false;
+    final [a, b, _, _] = parts.cast<int>();
+    if (a == 10) return true;
+    if (a == 192 && b == 168) return true;
+    if (a == 172 && b >= 16 && b <= 31) return true;
+    if (a == 169 && b == 254) return true; // link-local
+    return false;
+  }
+
+  bool _isAuthorized(HttpRequest request) {
+    final code = _pairingCode;
+    if (code == null) return false;
+    final provided = request.headers.value('X-Pairing-Code') ??
+        request.uri.queryParameters['code'];
+    return provided == code;
+  }
+
+  Future<void> _handleRequest(HttpRequest request) async {
     final response = request.response;
 
-    // CORS headers for mobile browser access
-    response.headers.add('Access-Control-Allow-Origin', '*');
-    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type');
+    // Same-origin only: no wildcard CORS. A malicious page in the user's
+    // browser must not be able to drive the TV.
+    response.headers
+      ..add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+      ..add('Access-Control-Allow-Headers', 'Content-Type, X-Pairing-Code')
+      ..add('X-Content-Type-Options', 'nosniff');
+
+    // Network-level gate.
+    final remote = request.connectionInfo?.remoteAddress;
+    if (remote == null || !_isPrivateAddress(remote)) {
+      debugPrint('TV Remote: rejected non-LAN client ${remote?.address}');
+      response
+        ..statusCode = HttpStatus.forbidden
+        ..write('Forbidden: LAN only');
+      await response.close();
+      return;
+    }
 
     if (request.method == 'OPTIONS') {
       response.statusCode = HttpStatus.ok;
-      response.close();
+      await response.close();
       return;
     }
 
@@ -78,103 +136,125 @@ class TVRemoteServer {
       switch (path) {
         case '/':
           _serveIndexPage(response);
-          break;
         case '/api/status':
+          // Unauthenticated: lets the phone confirm it reached the TV and
+          // discover whether pairing is required. Exposes no user data.
           _serveStatus(response);
-          break;
-        case '/api/login/qr':
-          _handleQRLogin(request, response);
-          break;
         case '/api/settings':
-          _handleSettings(request, response);
-          break;
         case '/api/control':
-          _handleControl(request, response);
-          break;
+          if (!_isAuthorized(request)) {
+            response.headers.contentType = ContentType.json;
+            response
+              ..statusCode = HttpStatus.unauthorized
+              ..write(jsonEncode({'error': 'invalid pairing code'}));
+            await response.close();
+            return;
+          }
+          if (path == '/api/settings') {
+            await _handleSettings(request, response);
+          } else {
+            await _handleControl(request, response);
+          }
         default:
-          response.statusCode = HttpStatus.notFound;
-          response.write('Not Found');
-          response.close();
+          response
+            ..statusCode = HttpStatus.notFound
+            ..write('Not Found');
+          await response.close();
       }
     } catch (e) {
-      response.statusCode = HttpStatus.internalServerError;
-      response.write('Server Error: $e');
-      response.close();
+      response
+        ..statusCode = HttpStatus.internalServerError
+        ..write('Server Error');
+      await response.close();
     }
   }
 
   void _serveIndexPage(HttpResponse response) {
     response.headers.contentType = ContentType.html;
-    response.write(_buildWebUI());
-    response.close();
+    response
+      ..write(_buildWebUI())
+      ..close();
   }
 
   void _serveStatus(HttpResponse response) {
     response.headers.contentType = ContentType.json;
-    final status = {
-      'server': 'running',
-      'version': '1.0.0',
-      'device': 'Android TV',
-    };
-    response.write(jsonEncode(status));
-    response.close();
+    response
+      ..write(jsonEncode({
+        'server': 'running',
+        'version': '2.0.0',
+        'device': 'Android TV',
+        'requiresPairing': true,
+      }))
+      ..close();
   }
 
-  Future<void> _handleQRLogin(HttpRequest request, HttpResponse response) async {
-    if (request.method == 'GET') {
-      // Return QR login URL (implement actual Bilibili QR login flow)
-      response.headers.contentType = ContentType.json;
-      final qrData = {
-        'qr_url': 'https://passport.bilibili.com/qrcode/getLoginUrl',
-        'status': 'pending',
-      };
-      response.write(jsonEncode(qrData));
-      response.close();
-    }
-  }
-
-  Future<void> _handleSettings(HttpRequest request, HttpResponse response) async {
+  Future<void> _handleSettings(
+    HttpRequest request,
+    HttpResponse response,
+  ) async {
     response.headers.contentType = ContentType.json;
 
     if (request.method == 'GET') {
-      // Return current settings
-      final settings = {
-        'volume': 50,
-        'quality': 'auto',
-        'danmaku_enabled': true,
-      };
-      response.write(jsonEncode(settings));
+      response.write(jsonEncode(_settingsSnapshot?.call() ?? const {}));
     } else if (request.method == 'POST') {
-      // Update settings
       final body = await utf8.decoder.bind(request).join();
-      final data = jsonDecode(body);
-      
-      // Apply settings (integrate with actual app settings)
-      debugPrint('Received settings update: $data');
-      
+      final data = jsonDecode(body) as Map<String, dynamic>;
+      _settingsHandler?.call(data);
       response.write(jsonEncode({'success': true}));
     }
 
-    response.close();
+    await response.close();
   }
 
-  Future<void> _handleControl(HttpRequest request, HttpResponse response) async {
+  Future<void> _handleControl(
+    HttpRequest request,
+    HttpResponse response,
+  ) async {
     if (request.method != 'POST') {
       response.statusCode = HttpStatus.methodNotAllowed;
-      response.close();
+      await response.close();
       return;
     }
 
     final body = await utf8.decoder.bind(request).join();
-    final data = jsonDecode(body);
+    final data = jsonDecode(body) as Map<String, dynamic>;
     final action = data['action'];
 
-    // Broadcast control action
+    if (action is! String || action.isEmpty) {
+      response.statusCode = HttpStatus.badRequest;
+      response.headers.contentType = ContentType.json;
+      response
+        ..write(jsonEncode({'error': 'missing action'}))
+        ..close();
+      return;
+    }
+
     _streamController.add(action);
 
     response.headers.contentType = ContentType.json;
-    response.write(jsonEncode({'success': true, 'action': action}));
-    response.close();
+    response
+      ..write(jsonEncode({
+        'success': true,
+        'action': action,
+        'state': _stateSnapshot?.call() ?? const {},
+      }))
+      ..close();
+  }
+
+  /// Injected by the bridge so HTTP responses can report real player state
+  /// instead of the hard-coded placeholders the first version returned.
+  Map<String, dynamic> Function()? _stateSnapshot;
+  Map<String, dynamic> Function()? _settingsSnapshot;
+  void Function(Map<String, dynamic>)? _settingsHandler;
+
+  void bindProviders({
+    Map<String, dynamic> Function()? state,
+    Map<String, dynamic> Function()? settings,
+    void Function(Map<String, dynamic>)? onSettings,
+  }) {
+    _stateSnapshot = state;
+    _settingsSnapshot = settings;
+    _settingsHandler = onSettings;
   }
 
   String _buildWebUI() {
@@ -193,6 +273,8 @@ class TVRemoteServer {
             color: #E0E6ED;
             min-height: 100vh;
             padding: 20px;
+            -webkit-user-select: none;
+            user-select: none;
         }
         .container { max-width: 600px; margin: 0 auto; }
         h1 {
@@ -203,11 +285,7 @@ class TVRemoteServer {
             -webkit-text-fill-color: transparent;
             background-clip: text;
         }
-        .subtitle {
-            color: #8B92A0;
-            font-size: 14px;
-            margin-bottom: 32px;
-        }
+        .subtitle { color: #8B92A0; font-size: 14px; margin-bottom: 24px; }
         .card {
             background: #161D2B;
             border-radius: 16px;
@@ -215,11 +293,7 @@ class TVRemoteServer {
             margin-bottom: 16px;
             border: 1px solid rgba(56, 189, 248, 0.1);
         }
-        .card h2 {
-            font-size: 18px;
-            margin-bottom: 16px;
-            color: #38BDF8;
-        }
+        .card h2 { font-size: 18px; margin-bottom: 16px; color: #38BDF8; }
         button {
             width: 100%;
             padding: 16px;
@@ -228,52 +302,38 @@ class TVRemoteServer {
             font-size: 16px;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: transform .08s, opacity .2s;
             margin-bottom: 12px;
         }
+        button:active { transform: scale(0.96); opacity: .85; }
         .btn-primary {
             background: linear-gradient(135deg, #38BDF8 0%, #3B6DFF 100%);
             color: white;
-        }
-        .btn-primary:active {
-            transform: scale(0.98);
-            opacity: 0.9;
         }
         .btn-secondary {
             background: #1E2636;
             color: #E0E6ED;
             border: 1px solid rgba(56, 189, 248, 0.2);
         }
-        .qr-container {
-            background: white;
-            padding: 20px;
-            border-radius: 12px;
-            text-align: center;
-            margin: 16px 0;
-        }
-        .qr-placeholder {
-            width: 200px;
-            height: 200px;
-            margin: 0 auto;
-            background: #f0f0f0;
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #666;
-        }
         .control-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
             gap: 12px;
-            margin-top: 16px;
+            margin-top: 8px;
         }
-        .control-grid button {
-            padding: 20px;
-            font-size: 24px;
-            margin: 0;
+        .control-grid button { padding: 22px 0; font-size: 24px; margin: 0; }
+        input {
+            width: 100%;
+            padding: 14px;
+            font-size: 20px;
+            letter-spacing: 6px;
+            text-align: center;
+            border-radius: 12px;
+            border: 1px solid rgba(56,189,248,.3);
+            background: #0F1520;
+            color: #E0E6ED;
+            margin-bottom: 12px;
         }
-        .center { text-align: center; }
         .status {
             display: inline-block;
             padding: 4px 12px;
@@ -283,6 +343,9 @@ class TVRemoteServer {
             color: #38BDF8;
             margin-bottom: 16px;
         }
+        .status.err { background: rgba(248,113,113,.12); color: #F87171; }
+        .status.ok  { background: rgba(74,222,128,.12); color: #4ADE80; }
+        .hidden { display: none; }
     </style>
 </head>
 <body>
@@ -290,81 +353,99 @@ class TVRemoteServer {
         <h1>PiliPlus TV 遥控器</h1>
         <p class="subtitle">通过手机控制你的电视端 PiliPlus</p>
 
-        <div class="card">
-            <h2>账号登录</h2>
-            <div class="status">● 连接成功</div>
-            <button class="btn-primary" onclick="showQR()">扫码登录</button>
-            <div id="qrCode" class="qr-container" style="display:none;">
-                <div class="qr-placeholder">二维码加载中...</div>
-                <p style="color: #666; margin-top: 12px; font-size: 14px;">
-                    使用 B 站 APP 扫码登录
-                </p>
-            </div>
+        <div class="card" id="pairCard">
+            <h2>配对</h2>
+            <p class="subtitle">输入电视屏幕上显示的 6 位配对码</p>
+            <input id="codeInput" inputmode="numeric" maxlength="6" placeholder="------">
+            <button class="btn-primary" onclick="pair()">连接</button>
+            <div id="pairStatus" class="status">● 未连接</div>
         </div>
 
-        <div class="card">
-            <h2>播放控制</h2>
-            <div class="control-grid">
-                <button class="btn-secondary" onclick="control('up')">↑</button>
-                <button class="btn-secondary" onclick="control('volume_up')">🔊</button>
-                <button class="btn-secondary" onclick="control('seek_forward')">⏩</button>
-                
-                <button class="btn-secondary" onclick="control('left')">←</button>
-                <button class="btn-primary" onclick="control('play_pause')">⏯</button>
-                <button class="btn-secondary" onclick="control('right')">→</button>
-                
-                <button class="btn-secondary" onclick="control('down')">↓</button>
-                <button class="btn-secondary" onclick="control('volume_down')">🔉</button>
-                <button class="btn-secondary" onclick="control('seek_backward')">⏪</button>
-            </div>
-        </div>
+        <div id="remote" class="hidden">
+            <div class="card">
+                <h2>播放控制</h2>
+                <div id="playState" class="status">● 已连接</div>
+                <div class="control-grid">
+                    <button class="btn-secondary" onclick="control('up')">↑</button>
+                    <button class="btn-secondary" onclick="control('volume_up')">🔊</button>
+                    <button class="btn-secondary" onclick="control('seek_forward')">⏩</button>
 
-        <div class="card">
-            <h2>快捷功能</h2>
-            <button class="btn-secondary" onclick="control('back')">返回</button>
-            <button class="btn-secondary" onclick="control('home')">主页</button>
-            <button class="btn-secondary" onclick="control('search')">搜索</button>
+                    <button class="btn-secondary" onclick="control('left')">←</button>
+                    <button class="btn-primary"   onclick="control('ok')">OK</button>
+                    <button class="btn-secondary" onclick="control('right')">→</button>
+
+                    <button class="btn-secondary" onclick="control('down')">↓</button>
+                    <button class="btn-secondary" onclick="control('volume_down')">🔉</button>
+                    <button class="btn-secondary" onclick="control('seek_backward')">⏪</button>
+                </div>
+                <button class="btn-primary" style="margin-top:12px"
+                        onclick="control('play_pause')">⏯ 播放 / 暂停</button>
+            </div>
+
+            <div class="card">
+                <h2>快捷功能</h2>
+                <button class="btn-secondary" onclick="control('back')">返回</button>
+                <button class="btn-secondary" onclick="control('home')">主页</button>
+                <button class="btn-secondary" onclick="control('search')">搜索</button>
+            </div>
         </div>
     </div>
 
     <script>
-        function showQR() {
-            const qrDiv = document.getElementById('qrCode');
-            qrDiv.style.display = qrDiv.style.display === 'none' ? 'block' : 'none';
-            
-            if (qrDiv.style.display === 'block') {
-                fetch('/api/login/qr')
-                    .then(r => r.json())
-                    .then(data => {
-                        console.log('QR data:', data);
-                        // TODO: Render actual QR code
-                    });
+        let code = sessionStorage.getItem('pp_code') || '';
+
+        function setPairStatus(msg, cls) {
+            const el = document.getElementById('pairStatus');
+            el.textContent = msg;
+            el.className = 'status ' + (cls || '');
+        }
+
+        async function send(action) {
+            return fetch('/api/control', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Pairing-Code': code
+                },
+                body: JSON.stringify({ action })
+            });
+        }
+
+        async function pair() {
+            code = document.getElementById('codeInput').value.trim();
+            const res = await send('ping');
+            if (res.status === 401) {
+                setPairStatus('● 配对码错误', 'err');
+                return;
+            }
+            sessionStorage.setItem('pp_code', code);
+            setPairStatus('● 已连接', 'ok');
+            document.getElementById('pairCard').classList.add('hidden');
+            document.getElementById('remote').classList.remove('hidden');
+        }
+
+        async function control(action) {
+            try {
+                const res = await send(action);
+                if (res.status === 401) {
+                    document.getElementById('pairCard').classList.remove('hidden');
+                    document.getElementById('remote').classList.add('hidden');
+                    setPairStatus('● 配对已失效，请重新输入', 'err');
+                    return;
+                }
+                const data = await res.json();
+                const st = data.state || {};
+                if (st.hasPlayer) {
+                    document.getElementById('playState').textContent =
+                        (st.playing ? '▶ 播放中' : '⏸ 已暂停');
+                }
+            } catch (e) {
+                setPairStatus('● 连接中断', 'err');
             }
         }
 
-        function control(action) {
-            fetch('/api/control', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action })
-            })
-            .then(r => r.json())
-            .then(data => {
-                console.log('Control response:', data);
-                // Visual feedback
-                event.target.style.transform = 'scale(0.95)';
-                setTimeout(() => {
-                    event.target.style.transform = 'scale(1)';
-                }, 100);
-            })
-            .catch(err => console.error('Control error:', err));
-        }
-
-        // Check server status on load
-        fetch('/api/status')
-            .then(r => r.json())
-            .then(data => console.log('Server status:', data))
-            .catch(err => console.error('Status check failed:', err));
+        // Auto-restore a previous session.
+        if (code) { pair(); }
     </script>
 </body>
 </html>
@@ -380,14 +461,12 @@ class TVRemoteServer {
 
       for (final interface in interfaces) {
         for (final addr in interface.addresses) {
-          // Prefer non-loopback addresses
           if (!addr.isLoopback && addr.address.startsWith('192.168.')) {
             return addr.address;
           }
         }
       }
 
-      // Fallback to first non-loopback
       for (final interface in interfaces) {
         for (final addr in interface.addresses) {
           if (!addr.isLoopback) {

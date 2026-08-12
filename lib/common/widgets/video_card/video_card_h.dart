@@ -4,6 +4,7 @@ import 'package:PiliPlus/common/widgets/image/image_save.dart';
 import 'package:PiliPlus/common/widgets/image/network_img_layer.dart';
 import 'package:PiliPlus/common/widgets/progress_bar/video_progress_indicator.dart';
 import 'package:PiliPlus/common/widgets/stat/stat.dart';
+import 'package:PiliPlus/common/widgets/tv_card.dart';
 import 'package:PiliPlus/common/widgets/video_popup_menu.dart';
 import 'package:PiliPlus/http/search.dart';
 import 'package:PiliPlus/models/horizontal_video_model.dart';
@@ -36,11 +37,12 @@ class VideoCardH extends StatelessWidget {
       cover: videoItem.cover,
     );
     final theme = Theme.of(context);
-    return Material(
-      type: .transparency,
-      child: Stack(
-        clipBehavior: .none,
-        children: [
+    return TVFocusHighlight(
+      child: Material(
+        type: .transparency,
+        child: Stack(
+          clipBehavior: .none,
+          children: [
           InkWell(
             onLongPress: onLongPress,
             onSecondaryTap: PlatformUtils.isMobile ? null : onLongPress,
@@ -174,7 +176,8 @@ class VideoCardH extends StatelessWidget {
               onRemove: onRemove,
             ),
           ),
-        ],
+          ],
+        ),
       ),
     );
   }

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:PiliPlus/services/tv_remote_bridge.dart';
 import 'package:PiliPlus/services/tv_remote_server.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -33,7 +34,13 @@ class _TVRemotePanelState extends State<TVRemotePanel> {
 
     try {
       final success = await _server.start();
-      if (!success) {
+      if (success) {
+        // Subscribe the executor, otherwise remote actions go nowhere.
+        TVRemoteBridge.instance.attach();
+        _server.bindProviders(
+          state: TVRemoteBridge.instance.currentState,
+        );
+      } else {
         setState(() {
           _errorMessage = '启动服务失败';
         });
@@ -163,6 +170,45 @@ class _TVRemotePanelState extends State<TVRemotePanel> {
               ),
             ),
             const SizedBox(height: 48),
+            // Pairing code — required by the phone to control the TV.
+            Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 48,
+                vertical: 28,
+              ),
+              decoration: BoxDecoration(
+                color: const Color(0xFF161D2B),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: const Color(0xFF4ADE80).withValues(alpha: 0.5),
+                  width: 2,
+                ),
+              ),
+              child: Column(
+                children: [
+                  const Text(
+                    '配对码',
+                    style: TextStyle(fontSize: 18, color: Colors.white70),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _server.pairingCode ?? '------',
+                    style: const TextStyle(
+                      fontSize: 44,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF4ADE80),
+                      letterSpacing: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    '在手机页面输入此配对码后即可控制',
+                    style: TextStyle(fontSize: 14, color: Colors.white54),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 48),
             // Instructions
             _buildInstructionCard(
               icon: Icons.phone_android,
@@ -171,15 +217,15 @@ class _TVRemotePanelState extends State<TVRemotePanel> {
             ),
             const SizedBox(height: 16),
             _buildInstructionCard(
-              icon: Icons.login,
-              title: '2. 在手机上登录账号',
-              subtitle: '扫描 B 站二维码快速登录',
+              icon: Icons.password,
+              title: '2. 输入电视上显示的配对码',
+              subtitle: '仅同一局域网内、且持有配对码的设备可控制',
             ),
             const SizedBox(height: 16),
             _buildInstructionCard(
-              icon: Icons.settings,
+              icon: Icons.settings_remote,
               title: '3. 远程控制电视',
-              subtitle: '播放控制、设置调整、搜索等',
+              subtitle: '方向导航、播放/暂停、音量、快进快退',
             ),
           ],
         ),

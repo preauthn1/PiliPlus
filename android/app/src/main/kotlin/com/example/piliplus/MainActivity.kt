@@ -3,6 +3,7 @@ package com.example.piliplus
 import android.app.UiModeManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
@@ -34,13 +35,36 @@ class MainActivity : AudioServiceActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "isAndroidTV" -> {
-                    val uiModeManager = getSystemService(Context.UI_MODE_SERVICE) as UiModeManager
-                    val isTV = uiModeManager.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
-                    result.success(isTV)
+                    result.success(detectTV())
                 }
                 else -> result.notImplemented()
             }
         }
+    }
+
+    /// Detect whether we are running on a TV / set-top box.
+    ///
+    /// UiModeManager alone is unreliable: many Chinese TV boxes and projectors
+    /// report UI_MODE_TYPE_NORMAL while still being leanback-only devices with
+    /// no touchscreen. We therefore treat any of the following as a TV.
+    private fun detectTV(): Boolean {
+        val uiModeManager = getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
+        if (uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION) {
+            return true
+        }
+        val pm = packageManager
+        if (pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK)) {
+            return true
+        }
+        @Suppress("DEPRECATION")
+        if (pm.hasSystemFeature("android.hardware.type.television")) {
+            return true
+        }
+        // Leanback-capable device without a touchscreen: treat as TV.
+        if (!pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)) {
+            return true
+        }
+        return false
     }
 
     override fun onDestroy() {
