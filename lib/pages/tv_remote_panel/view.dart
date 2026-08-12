@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:PiliPlus/services/tv_remote_bridge.dart';
+import 'package:PiliPlus/services/tv_remote_provider.dart';
 import 'package:PiliPlus/services/tv_remote_server.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
@@ -16,6 +17,7 @@ class _TVRemotePanelState extends State<TVRemotePanel> {
   final _server = TVRemoteServer.instance;
   bool _isStarting = false;
   String? _errorMessage;
+  bool _loginEnabled = false;
 
   @override
   void initState() {
@@ -34,8 +36,14 @@ class _TVRemotePanelState extends State<TVRemotePanel> {
       if (success) {
         // Subscribe the executor, otherwise remote actions go nowhere.
         TVRemoteBridge.instance.attach();
+        final provider = TVRemoteProvider.instance;
         _server.bindProviders(
           state: TVRemoteBridge.instance.currentState,
+          settings: provider.settingsSnapshot,
+          onSettings: provider.applySettings,
+          loginState: () => provider.loginState,
+          loginStart: provider.startQrLogin,
+          logout: provider.logout,
         );
       } else {
         setState(() {
@@ -193,6 +201,50 @@ class _TVRemotePanelState extends State<TVRemotePanel> {
                   const Text(
                     '在手机页面输入此配对码后即可控制',
                     style: TextStyle(fontSize: 14, color: Colors.white54),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 48),
+            // Login consent: a paired phone still cannot bind an account
+            // until this is armed on the TV itself.
+            Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 32,
+                vertical: 20,
+              ),
+              decoration: BoxDecoration(
+                color: const Color(0xFF161D2B),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.verified_user, color: Color(0xFF38BDF8)),
+                  const SizedBox(width: 16),
+                  const Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '允许网页登录',
+                        style: TextStyle(fontSize: 20, color: Colors.white),
+                      ),
+                      SizedBox(height: 4),
+                      Text(
+                        '开启后才能用手机扫码登录 B 站账号',
+                        style: TextStyle(fontSize: 14, color: Colors.white54),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(width: 24),
+                  Switch(
+                    value: _loginEnabled,
+                    onChanged: (v) {
+                      setState(() {
+                        _loginEnabled = v;
+                        TVRemoteProvider.instance.loginEnabled = v;
+                      });
+                    },
                   ),
                 ],
               ),

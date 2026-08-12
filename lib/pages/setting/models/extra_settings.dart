@@ -57,10 +57,10 @@ List<SettingsModel> get extraSettings => [
   // Always visible on Android: TV detection is unreliable, so the user must
   // be able to turn remote/D-Pad mode on themselves.
   if (Platform.isAndroid) ...[
-    SwitchModel(
+    const SwitchModel(
       title: '电视遥控模式',
       subtitle: '强制启用方向键导航与焦点高亮（电视盒子识别失败时打开）',
-      leading: const Icon(Icons.settings_remote),
+      leading: Icon(Icons.settings_remote),
       setKey: SettingBoxKey.forceDpadMode,
       onChanged: PlatformUtils.setForceDpad,
     ),

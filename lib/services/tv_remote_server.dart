@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:qr/qr.dart';
 
 /// TV Remote Control Server.
 ///
@@ -46,10 +47,20 @@ class TVRemoteServer {
     try {
       _localIP = await _getLocalIP();
       _pairingCode = _generatePairingCode();
-      _server = await HttpServer.bind(InternetAddress.anyIPv4, port);
+      // Bind to the LAN address itself rather than anyIPv4 so the socket is
+      // not even listening on other interfaces (cellular/VPN/tun). Falls back
+      // to anyIPv4 only if no LAN address was found, where the per-request
+      // check is still enforced.
+      final bindTarget = (strictLan && _localIP != null && _localIP != '127.0.0.1')
+          ? InternetAddress(_localIP!)
+          : InternetAddress.anyIPv4;
+      _server = await HttpServer.bind(bindTarget, port);
       _port = port;
 
-      debugPrint('TV Remote Server started on http://$_localIP:$_port');
+      debugPrint(
+        'TV Remote Server listening on ${bindTarget.address}:$port '
+        '(url http://$_localIP:$_port)',
+      );
 
       _server!.listen(_handleRequest);
       return true;
@@ -77,23 +88,37 @@ class TVRemoteServer {
     return List.generate(6, (_) => rnd.nextInt(10)).join();
   }
 
-  /// Only allow callers from private / link-local ranges.
-  static bool _isPrivateAddress(InternetAddress addr) {
+  /// Only allow callers from the local network.
+  ///
+  /// [strictLan] (default) restricts to the classic home-LAN ranges the user
+  /// asked for — 192.168.x.x plus loopback — so the panel cannot be reached
+  /// from a carrier-grade / VPN / hotspot range even if the device is
+  /// multi-homed. When false, all RFC1918 + link-local ranges are allowed.
+  static bool _isPrivateAddress(InternetAddress addr, {bool strictLan = true}) {
     if (addr.isLoopback) return true;
     if (addr.type != InternetAddressType.IPv4) {
       // IPv6 unique-local (fc00::/7) and link-local (fe80::/10)
       final a = addr.address.toLowerCase();
+      if (strictLan) return false;
       return a.startsWith('fc') || a.startsWith('fd') || a.startsWith('fe80');
     }
     final parts = addr.address.split('.').map(int.tryParse).toList();
     if (parts.length != 4 || parts.any((p) => p == null)) return false;
     final [a, b, _, _] = parts.cast<int>();
+    if (strictLan) {
+      // Home LAN only, as requested: 192.168.0.0/16.
+      return a == 192 && b == 168;
+    }
     if (a == 10) return true;
     if (a == 192 && b == 168) return true;
     if (a == 172 && b >= 16 && b <= 31) return true;
     if (a == 169 && b == 254) return true; // link-local
     return false;
   }
+
+  /// Whether to restrict callers to 192.168.x.x. Exposed for tests and for
+  /// users on 10.x / 172.16.x networks who need the wider range.
+  bool strictLan = true;
 
   bool _isAuthorized(HttpRequest request) {
     final code = _pairingCode;
@@ -115,7 +140,7 @@ class TVRemoteServer {
 
     // Network-level gate.
     final remote = request.connectionInfo?.remoteAddress;
-    if (remote == null || !_isPrivateAddress(remote)) {
+    if (remote == null || !_isPrivateAddress(remote, strictLan: strictLan)) {
       debugPrint('TV Remote: rejected non-LAN client ${remote?.address}');
       response
         ..statusCode = HttpStatus.forbidden
@@ -140,8 +165,20 @@ class TVRemoteServer {
           // Unauthenticated: lets the phone confirm it reached the TV and
           // discover whether pairing is required. Exposes no user data.
           _serveStatus(response);
+        case '/api/login/qr.svg':
+          if (!_isAuthorized(request)) {
+            response
+              ..statusCode = HttpStatus.unauthorized
+              ..write('unauthorized');
+            await response.close();
+            return;
+          }
+          _serveLoginQr(response);
         case '/api/settings':
         case '/api/control':
+        case '/api/login':
+        case '/api/login/start':
+        case '/api/logout':
           if (!_isAuthorized(request)) {
             response.headers.contentType = ContentType.json;
             response
@@ -150,10 +187,17 @@ class TVRemoteServer {
             await response.close();
             return;
           }
-          if (path == '/api/settings') {
-            await _handleSettings(request, response);
-          } else {
-            await _handleControl(request, response);
+          switch (path) {
+            case '/api/settings':
+              await _handleSettings(request, response);
+            case '/api/control':
+              await _handleControl(request, response);
+            case '/api/login':
+              await _handleLoginState(response);
+            case '/api/login/start':
+              await _handleLoginStart(response);
+            case '/api/logout':
+              await _handleLogout(response);
           }
         default:
           response
@@ -199,8 +243,8 @@ class TVRemoteServer {
     } else if (request.method == 'POST') {
       final body = await utf8.decoder.bind(request).join();
       final data = jsonDecode(body) as Map<String, dynamic>;
-      _settingsHandler?.call(data);
-      response.write(jsonEncode({'success': true}));
+      final updated = _settingsHandler?.call(data);
+      response.write(jsonEncode(updated ?? {'success': true}));
     }
 
     await response.close();
@@ -241,20 +285,106 @@ class TVRemoteServer {
       ..close();
   }
 
+  /// Renders the current login URL as an SVG QR code.
+  ///
+  /// Generated on-device so the phone never needs internet access or a
+  /// third-party QR service (which would leak the login URL).
+  void _serveLoginQr(HttpResponse response) {
+    final url = _loginState?.call()['url'] as String?;
+    if (url == null || url.isEmpty) {
+      response
+        ..statusCode = HttpStatus.notFound
+        ..write('no active login')
+        ..close();
+      return;
+    }
+
+    final qr = QrCode.fromData(
+      data: url,
+      errorCorrectLevel: QrErrorCorrectLevel.M,
+    );
+    final image = QrImage(qr);
+    final n = image.moduleCount;
+    const cell = 8;
+    final size = n * cell;
+
+    final buf = StringBuffer()
+      ..write(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="$size" '
+        'height="$size" viewBox="0 0 $size $size" shape-rendering="crispEdges">'
+        '<rect width="$size" height="$size" fill="#ffffff"/>',
+      );
+    for (var y = 0; y < n; y++) {
+      for (var x = 0; x < n; x++) {
+        if (image.isDark(y, x)) {
+          buf.write(
+            '<rect x="${x * cell}" y="${y * cell}" '
+            'width="$cell" height="$cell" fill="#000000"/>',
+          );
+        }
+      }
+    }
+    buf.write('</svg>');
+
+    response.headers
+      ..contentType = ContentType('image', 'svg+xml', charset: 'utf-8')
+      ..add('Cache-Control', 'no-store');
+    response
+      ..write(buf.toString())
+      ..close();
+  }
+
+  Future<void> _handleLoginState(HttpResponse response) async {
+    response.headers.contentType = ContentType.json;
+    response.write(jsonEncode(_loginState?.call() ?? const {}));
+    await response.close();
+  }
+
+  Future<void> _handleLoginStart(HttpResponse response) async {
+    response.headers.contentType = ContentType.json;
+    final start = _loginStart;
+    if (start == null) {
+      response.write(jsonEncode({'error': 'login unavailable'}));
+    } else {
+      response.write(jsonEncode(await start()));
+    }
+    await response.close();
+  }
+
+  Future<void> _handleLogout(HttpResponse response) async {
+    response.headers.contentType = ContentType.json;
+    final logout = _logout;
+    if (logout == null) {
+      response.write(jsonEncode({'error': 'logout unavailable'}));
+    } else {
+      response.write(jsonEncode(await logout()));
+    }
+    await response.close();
+  }
+
   /// Injected by the bridge so HTTP responses can report real player state
   /// instead of the hard-coded placeholders the first version returned.
   Map<String, dynamic> Function()? _stateSnapshot;
   Map<String, dynamic> Function()? _settingsSnapshot;
-  void Function(Map<String, dynamic>)? _settingsHandler;
+  Map<String, dynamic> Function(Map<String, dynamic>)? _settingsHandler;
+  Map<String, dynamic> Function()? _loginState;
+  Future<Map<String, dynamic>> Function()? _loginStart;
+  Future<Map<String, dynamic>> Function()? _logout;
 
   void bindProviders({
     Map<String, dynamic> Function()? state,
     Map<String, dynamic> Function()? settings,
-    void Function(Map<String, dynamic>)? onSettings,
+    Map<String, dynamic> Function(Map<String, dynamic>)? onSettings,
+    Map<String, dynamic> Function()? loginState,
+    Future<Map<String, dynamic>> Function()? loginStart,
+    Future<Map<String, dynamic>> Function()? logout,
   }) {
     _stateSnapshot = state;
     _settingsSnapshot = settings;
     _settingsHandler = onSettings;
+    _loginState = loginState;
+    _loginStart = loginStart;
+    _logout = logout;
   }
 
   String _buildWebUI() {
@@ -346,6 +476,29 @@ class TVRemoteServer {
         .status.err { background: rgba(248,113,113,.12); color: #F87171; }
         .status.ok  { background: rgba(74,222,128,.12); color: #4ADE80; }
         .hidden { display: none; }
+        .setting-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255,255,255,.06);
+        }
+        .setting-row:last-child { border-bottom: none; }
+        select {
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: #1E2636;
+            color: #E0E6ED;
+            border: 1px solid rgba(56,189,248,.25);
+            font-size: 15px;
+        }
+        #qrBox img {
+            display: block;
+            margin: 0 auto;
+            border-radius: 8px;
+            background: #fff;
+        }
     </style>
 </head>
 <body>
@@ -388,6 +541,31 @@ class TVRemoteServer {
                 <button class="btn-secondary" onclick="control('home')">主页</button>
                 <button class="btn-secondary" onclick="control('search')">搜索</button>
             </div>
+
+            <div class="card">
+                <h2>账号</h2>
+                <div id="loginStatus" class="status">● 未登录</div>
+                <div id="loginDisabled" class="hidden">
+                    <p class="subtitle">
+                        出于安全考虑，需先在电视上的「手机遥控」页面点击
+                        <b>允许网页登录</b>，才能从手机扫码登录。
+                    </p>
+                </div>
+                <div id="loginActions">
+                    <button class="btn-primary" onclick="startLogin()">获取登录二维码</button>
+                </div>
+                <div id="qrBox" class="qr-container hidden">
+                    <img id="qrImg" alt="登录二维码" width="220" height="220">
+                    <p id="qrHint">请用 B 站 App 扫码</p>
+                </div>
+                <button id="logoutBtn" class="btn-secondary hidden"
+                        onclick="doLogout()">退出登录</button>
+            </div>
+
+            <div class="card">
+                <h2>设置</h2>
+                <div id="settingsBox"><p class="subtitle">加载中…</p></div>
+            </div>
         </div>
     </div>
 
@@ -422,6 +600,8 @@ class TVRemoteServer {
             setPairStatus('● 已连接', 'ok');
             document.getElementById('pairCard').classList.add('hidden');
             document.getElementById('remote').classList.remove('hidden');
+            refreshLogin();
+            loadSettings();
         }
 
         async function control(action) {
@@ -444,6 +624,154 @@ class TVRemoteServer {
             }
         }
 
+        // ---------- login ----------
+        let loginTimer = null;
+
+        function api(path, opts) {
+            opts = opts || {};
+            opts.headers = Object.assign({}, opts.headers, {
+                'X-Pairing-Code': code
+            });
+            return fetch(path, opts);
+        }
+
+        function renderLogin(st) {
+            const statusEl = document.getElementById('loginStatus');
+            const disabled = document.getElementById('loginDisabled');
+            const actions = document.getElementById('loginActions');
+            const logoutBtn = document.getElementById('logoutBtn');
+            const qrBox = document.getElementById('qrBox');
+
+            if (st.logged) {
+                statusEl.textContent = '● 已登录 (mid ' + st.mid + ')';
+                statusEl.className = 'status ok';
+                actions.classList.add('hidden');
+                qrBox.classList.add('hidden');
+                disabled.classList.add('hidden');
+                logoutBtn.classList.remove('hidden');
+                if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
+                return;
+            }
+
+            logoutBtn.classList.add('hidden');
+            if (!st.enabled) {
+                statusEl.textContent = '● 电视未允许网页登录';
+                statusEl.className = 'status err';
+                disabled.classList.remove('hidden');
+                actions.classList.add('hidden');
+                return;
+            }
+            disabled.classList.add('hidden');
+            actions.classList.remove('hidden');
+
+            const map = {
+                idle: ['● 未登录', ''],
+                waiting: ['● 等待扫码', ''],
+                confirming: ['● 已扫码，请在手机上确认', ''],
+                expired: ['● 二维码已过期，请重新获取', 'err'],
+                error: ['● 获取二维码失败', 'err'],
+                success: ['● 登录成功', 'ok']
+            };
+            const m = map[st.status] || ['● ' + st.status, ''];
+            statusEl.textContent = m[0];
+            statusEl.className = 'status ' + m[1];
+
+            if (st.status === 'waiting' || st.status === 'confirming') {
+                document.getElementById('qrHint').textContent =
+                    '请用 B 站 App 扫码（剩余 ' + st.left + ' 秒）';
+            }
+        }
+
+        async function refreshLogin() {
+            try {
+                const res = await api('/api/login');
+                if (res.status === 401) return;
+                renderLogin(await res.json());
+            } catch (e) {}
+        }
+
+        async function startLogin() {
+            const res = await api('/api/login/start');
+            const st = await res.json();
+            if (st.error) {
+                renderLogin(st);
+                return;
+            }
+            // Cache-bust so each new session fetches a fresh QR.
+            document.getElementById('qrImg').src =
+                '/api/login/qr.svg?code=' + encodeURIComponent(code) +
+                '&t=' + Date.now();
+            document.getElementById('qrBox').classList.remove('hidden');
+            renderLogin(st);
+            if (loginTimer) clearInterval(loginTimer);
+            loginTimer = setInterval(refreshLogin, 2000);
+        }
+
+        async function doLogout() {
+            const res = await api('/api/logout');
+            renderLogin(await res.json());
+        }
+
+        // ---------- settings ----------
+        function renderSettings(data) {
+            const box = document.getElementById('settingsBox');
+            const items = (data && data.items) || [];
+            if (!items.length) {
+                box.innerHTML = '<p class="subtitle">无可调整项</p>';
+                return;
+            }
+            box.innerHTML = '';
+            items.forEach(function (it) {
+                const row = document.createElement('div');
+                row.className = 'setting-row';
+                const label = document.createElement('span');
+                label.textContent = it.title;
+                row.appendChild(label);
+
+                if (it.type === 'bool') {
+                    const btn = document.createElement('button');
+                    btn.className = it.value ? 'btn-primary' : 'btn-secondary';
+                    btn.style.width = 'auto';
+                    btn.style.margin = '0';
+                    btn.style.padding = '8px 18px';
+                    btn.textContent = it.value ? '开' : '关';
+                    btn.onclick = function () { setSetting(it.key, !it.value); };
+                    row.appendChild(btn);
+                } else if (it.type === 'options') {
+                    const sel = document.createElement('select');
+                    (it.options || []).forEach(function (o) {
+                        const op = document.createElement('option');
+                        op.value = o.value;
+                        op.textContent = o.label;
+                        if (o.value === it.value) op.selected = true;
+                        sel.appendChild(op);
+                    });
+                    sel.onchange = function () {
+                        setSetting(it.key, parseInt(sel.value, 10));
+                    };
+                    row.appendChild(sel);
+                }
+                box.appendChild(row);
+            });
+        }
+
+        async function loadSettings() {
+            try {
+                const res = await api('/api/settings');
+                if (res.status === 401) return;
+                renderSettings(await res.json());
+            } catch (e) {}
+        }
+
+        async function setSetting(key, value) {
+            const res = await api('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key: key, value: value })
+            });
+            if (res.ok) renderSettings(await res.json());
+        }
+
         // Auto-restore a previous session.
         if (code) { pair(); }
     </script>
@@ -459,6 +787,7 @@ class TVRemoteServer {
         includeLinkLocal: false,
       );
 
+      // Prefer the home LAN range the panel is meant to serve.
       for (final interface in interfaces) {
         for (final addr in interface.addresses) {
           if (!addr.isLoopback && addr.address.startsWith('192.168.')) {
@@ -466,6 +795,11 @@ class TVRemoteServer {
           }
         }
       }
+
+      // In strict mode we deliberately do NOT fall back to some other
+      // interface (cellular/VPN); binding there would expose the panel
+      // outside the home LAN.
+      if (strictLan) return '127.0.0.1';
 
       for (final interface in interfaces) {
         for (final addr in interface.addresses) {
