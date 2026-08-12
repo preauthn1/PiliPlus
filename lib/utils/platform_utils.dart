@@ -1,5 +1,7 @@
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 abstract final class PlatformUtils {
   @pragma("vm:platform-const")
   static final bool isMobile = Platform.isAndroid || Platform.isIOS;
@@ -30,5 +32,12 @@ abstract final class PlatformUtils {
     _tvResolved = true;
   }
 
-  static bool get isTV => Platform.isAndroid && _isAndroidTV;
+  /// Test-only override. [isTV] normally requires `Platform.isAndroid`,
+  /// which is false on a desktop test host, so widget tests cannot exercise
+  /// TV behaviour without this hook.
+  @visibleForTesting
+  static bool? debugForceTV;
+
+  static bool get isTV =>
+      debugForceTV ?? (Platform.isAndroid && _isAndroidTV);
 }
