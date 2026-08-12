@@ -18,6 +18,23 @@ class TVFocusScope extends StatefulWidget {
 
   final Widget child;
 
+  /// Test-only handle on the crash-safe focus request callback.
+  @visibleForTesting
+  static void debugSafeRequestFocus(
+    FocusNode node, {
+    ScrollPositionAlignmentPolicy? alignmentPolicy,
+    double? alignment,
+    Duration? duration,
+    Curve? curve,
+  }) =>
+      _TVFocusScopeState._safeRequestFocus(
+        node,
+        alignmentPolicy: alignmentPolicy,
+        alignment: alignment,
+        duration: duration,
+        curve: curve,
+      );
+
   @override
   State<TVFocusScope> createState() => _TVFocusScopeState();
 }
@@ -53,6 +70,22 @@ class _TVFocusScopeState extends State<TVFocusScope> {
         current.context == null;
   }
 
+  /// Whether a node is safe to focus.
+  ///
+  /// Focusing a node that is attached but **not yet laid out** makes
+  /// Flutter's default traversal callback call `Scrollable.ensureVisible`,
+  /// which reads `RenderBox.size` and throws
+  /// `Bad state: RenderBox was not laid out`. Lazily-built lists routinely
+  /// contain such nodes, so every candidate must be screened.
+  static bool _isFocusable(FocusNode node) {
+    if (!node.canRequestFocus || node.skipTraversal) return false;
+    final context = node.context;
+    if (context == null || !context.mounted) return false;
+    final ro = context.findRenderObject();
+    if (ro is! RenderBox) return false;
+    return ro.attached && ro.hasSize;
+  }
+
   /// Give the D-Pad an origin. Without this the first key press is swallowed.
   void _seedFocus() {
     if (!mounted || !_focusIsEmpty) {
@@ -64,15 +97,15 @@ class _TVFocusScopeState extends State<TVFocusScope> {
     if (scope != null) {
       // Prefer whatever this scope last had focused (route restore).
       final remembered = scope.focusedChild;
-      if (remembered != null && remembered.context != null) {
+      if (remembered != null && _isFocusable(remembered)) {
         remembered.requestFocus();
         _seedAttempts = 0;
         return;
       }
-      final candidates = scope.traversalDescendants
-          .where((n) => n.canRequestFocus && !n.skipTraversal);
-      if (candidates.isNotEmpty) {
-        candidates.first.requestFocus();
+      final candidate =
+          scope.traversalDescendants.where(_isFocusable).firstOrNull;
+      if (candidate != null) {
+        candidate.requestFocus();
         _seedAttempts = 0;
         return;
       }
@@ -111,9 +144,9 @@ class _TVFocusScopeState extends State<TVFocusScope> {
     // Gamepad-style buttons some Android TV remotes emit are not in Flutter's
     // default WidgetsApp activation shortcut map.
     if (key == LogicalKeyboardKey.gameButtonA) {
-      final ctx = FocusManager.instance.primaryFocus?.context;
-      if (ctx != null) {
-        Actions.maybeInvoke(ctx, const ActivateIntent());
+      final primary = FocusManager.instance.primaryFocus;
+      if (primary != null && _isFocusable(primary)) {
+        Actions.maybeInvoke(primary.context!, const ActivateIntent());
         return KeyEventResult.handled;
       }
     }
@@ -121,15 +154,50 @@ class _TVFocusScopeState extends State<TVFocusScope> {
     return KeyEventResult.ignored;
   }
 
+  /// Focus-request callback that will not crash on unlaid-out nodes.
+  ///
+  /// Flutter's [FocusTraversalPolicy.defaultTraversalRequestFocusCallback]
+  /// unconditionally does `node.context!` and `Scrollable.ensureVisible(...)`.
+  /// When D-Pad traversal lands on a node inside a lazily-built list that is
+  /// attached but not yet laid out, that throws:
+  ///   * `Null check operator used on a null value`
+  ///   * `Bad state: RenderBox was not laid out: RenderSemanticsAnnotations#...`
+  /// Both were observed on device as a rapid burst while navigating.
+  static void _safeRequestFocus(
+    FocusNode node, {
+    ScrollPositionAlignmentPolicy? alignmentPolicy,
+    double? alignment,
+    Duration? duration,
+    Curve? curve,
+  }) {
+    node.requestFocus();
+    // Only scroll it into view once we know it is actually laid out.
+    if (!_isFocusable(node)) return;
+    Scrollable.ensureVisible(
+      node.context!,
+      alignment: alignment ?? 1,
+      alignmentPolicy: alignmentPolicy ?? ScrollPositionAlignmentPolicy.explicit,
+      duration: duration ?? Duration.zero,
+      curve: curve ?? Curves.ease,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!PlatformUtils.isTV) {
       return widget.child;
     }
-    return Focus(
-      focusNode: _rootNode,
-      onKeyEvent: _onKey,
-      child: widget.child,
+    return FocusTraversalGroup(
+      // Same ordering as Flutter's default (which already provides
+      // directional traversal), but with a crash-safe focus request.
+      policy: ReadingOrderTraversalPolicy(
+        requestFocusCallback: _safeRequestFocus,
+      ),
+      child: Focus(
+        focusNode: _rootNode,
+        onKeyEvent: _onKey,
+        child: widget.child,
+      ),
     );
   }
 }
