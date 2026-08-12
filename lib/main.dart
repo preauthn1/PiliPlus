@@ -134,7 +134,8 @@ void main() async {
     }
     await Future.wait([
       // TVs are always landscape and must never be pinned to portraitUp.
-      if (PlatformUtils.isTV)
+      // Uses dpadMode so a saved manual override also applies at startup.
+      if (PlatformUtils.dpadMode)
         ?landscapeLeftMode()
       else if (Pref.horizontalScreen)
         ?fullMode()
@@ -284,6 +285,15 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Rebuild the whole app (and therefore the theme, which bakes in
+    // focusColor) when D-Pad mode flips on after a remote key is detected.
+    return ValueListenableBuilder<bool>(
+      valueListenable: PlatformUtils.dpadModeNotifier,
+      builder: (context, _, _) => _buildApp(),
+    );
+  }
+
+  Widget _buildApp() {
     final (light, dark) = getAllTheme();
     return GetMaterialApp(
       title: Constants.appName,

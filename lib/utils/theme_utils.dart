@@ -47,7 +47,9 @@ abstract final class ThemeUtils {
       // it strong and always-on. Without this every InkWell-based card is
       // focusable but visually indistinguishable, which reads as "the remote
       // does nothing".
-      focusColor: PlatformUtils.isTV
+      // Follows dpadMode, not raw detection: on boxes where detection fails
+      // the highlight must still appear once a D-Pad key is seen.
+      focusColor: PlatformUtils.dpadMode
           ? colorScheme.primary.withValues(alpha: 0.32)
           : null,
       textTheme: fontWeight == null
