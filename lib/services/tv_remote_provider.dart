@@ -1,14 +1,17 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/http/login.dart';
 import 'package:PiliPlus/models/common/account_type.dart';
 import 'package:PiliPlus/models/common/video/video_quality.dart';
+import 'package:PiliPlus/services/logger.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/accounts/account.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
+import 'package:catcher_2/catcher_2.dart';
 import 'package:flutter/foundation.dart';
 
 /// Backs the web remote's login and settings features with the app's real
@@ -152,6 +155,49 @@ class TVRemoteProvider {
   }
 
   void disposeLogin() => _cancelPoll();
+
+  // ---------------------------------------------------------------------
+  // Error logs
+  // ---------------------------------------------------------------------
+
+  /// Returns recent Catcher reports with complete stack traces.
+  /// Device/application parameter maps are deliberately not exposed.
+  Future<Map<String, dynamic>> logsSnapshot(int limit) async {
+    final safeLimit = limit.clamp(1, 200);
+    final file = await LoggerUtils.getLogsPath();
+    final lines = await file.readAsLines();
+    final items = <Map<String, dynamic>>[];
+
+    for (final line in lines.reversed) {
+      if (items.length >= safeLimit) break;
+      try {
+        final decoded = jsonDecode(line);
+        if (decoded is! Map<String, dynamic>) continue;
+        final report = Report.fromJson(decoded);
+        final error = report.error.toString();
+        final stackTrace = report.stackTrace?.toString() ?? '';
+        items.add({
+          'error': error,
+          'dateTime': report.dateTime.toIso8601String(),
+          'stackTrace': stackTrace,
+          'copyText': [
+            report.dateTime.toIso8601String(),
+            error,
+            if (stackTrace.isNotEmpty) stackTrace,
+          ].join('\n'),
+        });
+      } catch (e) {
+        items.add({
+          'error': 'Parse log failed: $e',
+          'dateTime': '',
+          'stackTrace': '',
+          'copyText': 'Parse log failed: $e\n$line',
+        });
+      }
+    }
+
+    return {'items': items, 'count': items.length, 'total': lines.length};
+  }
 
   // ---------------------------------------------------------------------
   // Settings

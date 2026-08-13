@@ -175,6 +175,7 @@ class TVRemoteServer {
           }
           _serveLoginQr(response);
         case '/api/settings':
+        case '/api/logs':
         case '/api/control':
         case '/api/login':
         case '/api/login/start':
@@ -190,6 +191,8 @@ class TVRemoteServer {
           switch (path) {
             case '/api/settings':
               await _handleSettings(request, response);
+            case '/api/logs':
+              await _handleLogs(request, response);
             case '/api/control':
               await _handleControl(request, response);
             case '/api/login':
@@ -247,6 +250,33 @@ class TVRemoteServer {
       response.write(jsonEncode(updated ?? {'success': true}));
     }
 
+    await response.close();
+  }
+
+  Future<void> _handleLogs(
+    HttpRequest request,
+    HttpResponse response,
+  ) async {
+    response.headers.contentType = ContentType.json;
+    response.headers
+      ..set(HttpHeaders.cacheControlHeader, 'no-store')
+      ..set(HttpHeaders.pragmaHeader, 'no-cache');
+    if (request.method != 'GET') {
+      response.statusCode = HttpStatus.methodNotAllowed;
+      await response.close();
+      return;
+    }
+
+    final requested = int.tryParse(request.uri.queryParameters['limit'] ?? '50');
+    final limit = (requested ?? 50).clamp(1, 200);
+    final provider = _logsSnapshot;
+    if (provider == null) {
+      response
+        ..statusCode = HttpStatus.serviceUnavailable
+        ..write(jsonEncode({'error': 'logs unavailable'}));
+    } else {
+      response.write(jsonEncode(await provider(limit)));
+    }
     await response.close();
   }
 
@@ -370,6 +400,7 @@ class TVRemoteServer {
   Map<String, dynamic> Function()? _loginState;
   Future<Map<String, dynamic>> Function()? _loginStart;
   Future<Map<String, dynamic>> Function()? _logout;
+  Future<Map<String, dynamic>> Function(int limit)? _logsSnapshot;
 
   void bindProviders({
     Map<String, dynamic> Function()? state,
@@ -378,6 +409,7 @@ class TVRemoteServer {
     Map<String, dynamic> Function()? loginState,
     Future<Map<String, dynamic>> Function()? loginStart,
     Future<Map<String, dynamic>> Function()? logout,
+    Future<Map<String, dynamic>> Function(int limit)? logs,
   }) {
     _stateSnapshot = state;
     _settingsSnapshot = settings;
@@ -385,6 +417,7 @@ class TVRemoteServer {
     _loginState = loginState;
     _loginStart = loginStart;
     _logout = logout;
+    _logsSnapshot = logs;
   }
 
   String _buildWebUI() {
@@ -499,6 +532,49 @@ class TVRemoteServer {
             border-radius: 8px;
             background: #fff;
         }
+        .section-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .section-head h2 { margin: 0; }
+        .section-actions { display: flex; gap: 8px; }
+        .section-actions button {
+            width: auto;
+            margin: 0;
+            padding: 9px 13px;
+            font-size: 14px;
+        }
+        .logs-summary { color: #8B92A0; font-size: 13px; margin-bottom: 12px; }
+        .log-item {
+            border: 1px solid rgba(255,255,255,.08);
+            background: #0F1520;
+            border-radius: 12px;
+            margin-bottom: 10px;
+            overflow: hidden;
+        }
+        .log-item summary {
+            cursor: pointer;
+            padding: 14px;
+            list-style: none;
+        }
+        .log-item summary::-webkit-details-marker { display: none; }
+        .log-error { font-weight: 650; line-height: 1.45; overflow-wrap: anywhere; }
+        .log-time { color: #8B92A0; font-size: 12px; margin-top: 6px; }
+        .log-detail { border-top: 1px solid rgba(255,255,255,.07); padding: 12px; }
+        .log-detail pre {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            user-select: text;
+            -webkit-user-select: text;
+            font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+            color: #C9D4E2;
+            max-height: 52vh;
+            overflow: auto;
+        }
+        .copy-one { margin: 10px 0 0; padding: 10px 12px; font-size: 14px; }
     </style>
 </head>
 <body>
@@ -563,6 +639,18 @@ class TVRemoteServer {
             </div>
 
             <div class="card">
+                <div class="section-head">
+                    <h2>错误日志</h2>
+                    <div class="section-actions">
+                        <button class="btn-secondary" onclick="loadLogs()">刷新</button>
+                        <button class="btn-primary" onclick="copyAllLogs()">复制全部</button>
+                    </div>
+                </div>
+                <div id="logsSummary" class="logs-summary">加载中…</div>
+                <div id="logsBox"></div>
+            </div>
+
+            <div class="card">
                 <h2>设置</h2>
                 <div id="settingsBox"><p class="subtitle">加载中…</p></div>
             </div>
@@ -601,6 +689,7 @@ class TVRemoteServer {
             document.getElementById('pairCard').classList.add('hidden');
             document.getElementById('remote').classList.remove('hidden');
             refreshLogin();
+            loadLogs();
             loadSettings();
         }
 
@@ -710,6 +799,97 @@ class TVRemoteServer {
         async function doLogout() {
             const res = await api('/api/logout');
             renderLogin(await res.json());
+        }
+
+        // ---------- error logs ----------
+        let currentLogs = [];
+
+        function formatLogTime(value) {
+            if (!value) return '时间未知';
+            const date = new Date(value);
+            return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+        }
+
+        async function copyText(text, button) {
+            try {
+                await navigator.clipboard.writeText(text);
+            } catch (e) {
+                const area = document.createElement('textarea');
+                area.value = text;
+                area.style.position = 'fixed';
+                area.style.opacity = '0';
+                document.body.appendChild(area);
+                area.select();
+                document.execCommand('copy');
+                area.remove();
+            }
+            if (button) {
+                const old = button.textContent;
+                button.textContent = '已复制';
+                setTimeout(function () { button.textContent = old; }, 1200);
+            }
+        }
+
+        function renderLogs(data) {
+            const box = document.getElementById('logsBox');
+            const summary = document.getElementById('logsSummary');
+            currentLogs = (data && data.items) || [];
+            summary.textContent = '显示最近 ' + currentLogs.length +
+                ' 条，共 ' + ((data && data.total) || 0) + ' 条';
+            box.innerHTML = '';
+            if (!currentLogs.length) {
+                box.innerHTML = '<p class="subtitle">暂无错误日志</p>';
+                return;
+            }
+            currentLogs.forEach(function (item) {
+                const details = document.createElement('details');
+                details.className = 'log-item';
+                const head = document.createElement('summary');
+                const error = document.createElement('div');
+                error.className = 'log-error';
+                error.textContent = item.error || '未知错误';
+                const time = document.createElement('div');
+                time.className = 'log-time';
+                time.textContent = formatLogTime(item.dateTime);
+                head.appendChild(error);
+                head.appendChild(time);
+
+                const detail = document.createElement('div');
+                detail.className = 'log-detail';
+                const pre = document.createElement('pre');
+                pre.textContent = item.copyText || item.error || '';
+                const copy = document.createElement('button');
+                copy.className = 'btn-secondary copy-one';
+                copy.textContent = '复制这条日志';
+                copy.onclick = function () { copyText(item.copyText || '', copy); };
+                detail.appendChild(pre);
+                detail.appendChild(copy);
+                details.appendChild(head);
+                details.appendChild(detail);
+                box.appendChild(details);
+            });
+        }
+
+        async function loadLogs() {
+            const summary = document.getElementById('logsSummary');
+            summary.textContent = '正在读取电视日志…';
+            try {
+                const res = await api('/api/logs?limit=' + 50);
+                if (res.status === 401) return;
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                renderLogs(await res.json());
+            } catch (e) {
+                summary.textContent = '读取失败：' + e.message;
+            }
+        }
+
+        function copyAllLogs() {
+            if (!currentLogs.length) return;
+            const text = currentLogs.map(function (item) {
+                return item.copyText || item.error || '';
+            }).join('\n\n==============================\n\n');
+            const button = document.querySelector('[onclick="copyAllLogs()"]');
+            copyText(text, button);
         }
 
         // ---------- settings ----------

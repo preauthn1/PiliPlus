@@ -44,6 +44,7 @@ class _TVRemotePanelState extends State<TVRemotePanel> {
           loginState: () => provider.loginState,
           loginStart: provider.startQrLogin,
           logout: provider.logout,
+          logs: provider.logsSnapshot,
         );
       } else {
         setState(() {
