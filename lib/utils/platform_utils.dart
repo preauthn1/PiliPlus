@@ -66,10 +66,27 @@ abstract final class PlatformUtils {
   static bool get dpadMode =>
       debugForceTV ?? (dpadModeNotifier.value || _userForcedDpad);
 
+  /// Hook invoked whenever D-Pad mode turns on.
+  ///
+  /// Set once from `main()`. Kept as an injected callback rather than a direct
+  /// import so this file stays a leaf: importing the orientation helpers here
+  /// would drag the storage/player dependency chain into every widget that
+  /// reads [dpadMode].
+  ///
+  /// Its job is to re-apply the screen orientation. Startup decides
+  /// orientation *before* any key can arrive, so on a box where native
+  /// detection fails the app pins the phone default (portraitUp) on a
+  /// landscape-only device. When the first real remote key flips the mode on,
+  /// this puts the picture right instead of leaving it rotated/cropped — with
+  /// the D-Pad directions no longer matching on-screen geometry — for the
+  /// whole session.
+  static VoidCallback? onDpadModeEnabled;
+
   static void _enableDpad(String reason) {
     if (dpadModeNotifier.value) return;
     debugPrint('D-Pad mode enabled ($reason)');
     dpadModeNotifier.value = true;
+    onDpadModeEnabled?.call();
   }
 
   /// Called when a real directional/select key is observed.

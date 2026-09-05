@@ -1,0 +1,50 @@
+name: TV D-Pad tests
+
+# The dead-remote bug regressed three times because the regression suite was
+# never gated: `test*` in .gitignore kept it out of the repo entirely, so a
+# locally-green suite proved nothing about what shipped.
+
+on:
+    push:
+        paths:
+            - "lib/**"
+            - "test/**"
+            - ".github/workflows/tv_tests.yml"
+    pull_request:
+        paths:
+            - "lib/**"
+            - "test/**"
+    workflow_dispatch:
+
+jobs:
+    test:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: subosito/flutter-action@v2
+              with:
+                  channel: stable
+                  cache: true
+
+            - name: Install dependencies
+              run: flutter pub get
+
+            - name: Verify the TV suite is actually present
+              # Guards the .gitignore trap: if these files stop being tracked,
+              # the suite would "pass" by running nothing at all.
+              run: |
+                  set -e
+                  for f in \
+                    test/tv_production_topology_test.dart \
+                    test/tv_no_regression_test.dart \
+                    test/tv_end_to_end_journey_test.dart \
+                    test/tv_offstage_focus_test.dart \
+                    test/tv_back_key_test.dart \
+                    test/tv_orientation_test.dart \
+                    test/tv_player_focus_test.dart ; do
+                      test -f "$f" || { echo "::error::missing $f"; exit 1; }
+                  done
+
+            - name: Run tests
+              run: flutter test test/

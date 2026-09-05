@@ -115,6 +115,15 @@ void main() async {
   if (PlatformUtils.isMobile) {
     if (Platform.isAndroid) {
       MaxScreenSize.init();
+      // Re-apply orientation whenever D-Pad mode turns on. Startup decides
+      // orientation before any key can arrive, so on a box where native
+      // detection fails we would otherwise stay pinned to the phone default
+      // (portraitUp) on a landscape-only device for the whole session.
+      PlatformUtils.onDpadModeEnabled = applyOrientationForDpadMode;
+      // Some TV boxes deliver the remote's BACK button as a plain key event
+      // rather than a system back event. Reuse the app's own back handler so
+      // both paths behave identically.
+      TVFocusScope.onBackKey = MyApp.handleBack;
       // Detect Android TV. Must complete BEFORE orientation setup below,
       // otherwise a TV would be locked to portraitUp.
       try {
@@ -135,12 +144,7 @@ void main() async {
     await Future.wait([
       // TVs are always landscape and must never be pinned to portraitUp.
       // Uses dpadMode so a saved manual override also applies at startup.
-      if (PlatformUtils.dpadMode)
-        ?landscapeLeftMode()
-      else if (Pref.horizontalScreen)
-        ?fullMode()
-      else
-        ?portraitUpMode(),
+      ?applyOrientationForDpadMode(),
       setupServiceLocator(),
     ]);
   } else if (Platform.isWindows) {
@@ -241,6 +245,13 @@ class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
   static ColorScheme? _light, _dark;
+
+  /// The app's single back-navigation entry point.
+  ///
+  /// Shared by the desktop [BackDetector], the TV remote's BACK key
+  /// ([TVFocusScope.onBackKey]) and the system back button, so the three
+  /// cannot drift apart.
+  static void handleBack() => _onBack();
 
   static void _onBack() {
     if (SmartDialog.checkExist()) {

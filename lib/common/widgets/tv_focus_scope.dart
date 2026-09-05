@@ -1,5 +1,7 @@
+import 'package:PiliPlus/utils/dpad_nav_policy.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderOffstage;
 import 'package:flutter/services.dart';
 
 /// Root-level focus plumbing for TV / D-Pad navigation.
@@ -18,6 +20,12 @@ class TVFocusScope extends StatefulWidget {
 
   final Widget child;
 
+  /// Invoked when the remote's BACK key arrives as a plain key event.
+  ///
+  /// Wired from main.dart to the app's existing back handler, so the remote
+  /// and the system back button share one code path and cannot drift.
+  static VoidCallback? onBackKey;
+
   /// Test-only handle on the crash-safe focus request callback.
   @visibleForTesting
   static void debugSafeRequestFocus(
@@ -34,6 +42,11 @@ class TVFocusScope extends StatefulWidget {
         duration: duration,
         curve: curve,
       );
+
+  /// Test-only handle on the seed-candidate screen.
+  @visibleForTesting
+  static bool debugIsSeedable(FocusNode node) =>
+      _TVFocusScopeState._isFocusable(node);
 
   @override
   State<TVFocusScope> createState() => _TVFocusScopeState();
@@ -81,6 +94,9 @@ class _TVFocusScopeState extends State<TVFocusScope> {
     if (!mounted) return;
     setState(() {});
     if (PlatformUtils.dpadMode) {
+      // Orientation is re-applied by PlatformUtils.onDpadModeEnabled (wired
+      // in main.dart) — keeping that out of this file avoids dragging the
+      // player/storage dependency chain into the root focus widget.
       _seedAttempts = 0;
       WidgetsBinding.instance.addPostFrameCallback((_) => _seedFocus());
     }
@@ -105,42 +121,106 @@ class _TVFocusScopeState extends State<TVFocusScope> {
 
   /// Whether a node is safe to focus.
   ///
-  /// Focusing a node that is attached but **not yet laid out** makes
-  /// Flutter's default traversal callback call `Scrollable.ensureVisible`,
-  /// which reads `RenderBox.size` and throws
-  /// `Bad state: RenderBox was not laid out`. Lazily-built lists routinely
-  /// contain such nodes, so every candidate must be screened.
+  /// Two independent screens, both learned the hard way:
+  ///
+  ///  * **Never a [FocusScopeNode]** — see above.
+  ///  * **Must be laid out** — focusing an attached-but-unlaid-out node makes
+  ///    Flutter's default traversal callback call `Scrollable.ensureVisible`,
+  ///    which reads `RenderBox.size` and throws
+  ///    `Bad state: RenderBox was not laid out`. Lazily-built lists routinely
+  ///    contain such nodes.
+  ///  * **Must actually be visible** — the main page is a TabBarView/PageView,
+  ///    so sibling tabs stay mounted *and laid out* while off screen. Such a
+  ///    node passes every size check, so seeding could hand focus to something
+  ///    the user cannot see: no highlight appears anywhere and OK opens an
+  ///    item from a different tab. `Offstage` and zero-size nodes are the same
+  ///    class of problem.
   static bool _isFocusable(FocusNode node) {
+    if (node is FocusScopeNode) return false;
     if (!node.canRequestFocus || node.skipTraversal) return false;
     final context = node.context;
     if (context == null || !context.mounted) return false;
     final ro = context.findRenderObject();
     if (ro is! RenderBox) return false;
-    return ro.attached && ro.hasSize;
+    if (!ro.attached || !ro.hasSize) return false;
+    // Zero-size widgets give the user nothing to look at.
+    if (ro.size.isEmpty) return false;
+    // Hidden by Offstage / an inactive TabBarView page.
+    if (!_isVisible(ro)) return false;
+    return true;
+  }
+
+  /// Whether [box] is currently painted on screen.
+  ///
+  /// Walks up the render tree looking for anything that suppresses painting.
+  /// `Offstage` (used for inactive routes and keep-alive content) still lays
+  /// its subtree out, so a size check alone does not catch it.
+  static bool _isVisible(RenderBox box) {
+    RenderObject? node = box;
+    var depth = 0;
+    while (node != null && depth++ < 200) {
+      if (node is RenderOffstage && node.offstage) return false;
+      final parent = node.parent;
+      if (parent == null) break;
+      // paintsChild() is false for the non-visible children of Offstage,
+      // Visibility, IndexedStack and inactive TabBarView pages.
+      if (!parent.paintsChild(node)) return false;
+      node = parent;
+    }
+    return true;
+  }
+
+  /// The scope that owns the currently visible route.
+  ///
+  /// Mounted above the Navigator, `_rootNode.nearestScope` is the *app* scope,
+  /// whose descendants also include every route still mounted underneath the
+  /// top one. Seeding from there could focus an invisible widget on a covered
+  /// page. Walking down the `focusedChild` chain lands on the innermost active
+  /// scope, which is the current route.
+  FocusScopeNode? _activeScope() {
+    FocusScopeNode? scope = _rootNode.nearestScope;
+    if (scope == null) return null;
+    // Bounded: guards against a pathological cycle in the focus tree.
+    for (var depth = 0; depth < 32; depth++) {
+      final child = scope!.focusedChild;
+      if (child is FocusScopeNode && child != scope) {
+        scope = child;
+      } else {
+        break;
+      }
+    }
+    return scope;
   }
 
   /// Give the D-Pad an origin. Without this the first key press is swallowed.
-  void _seedFocus() {
-    if (!mounted || !_focusIsEmpty) {
+  ///
+  /// Returns whether a real, traversable node now holds focus. Callers must
+  /// only consume a key press when this returned true — consuming on failure
+  /// is exactly how the remote went permanently dead before.
+  bool _seedFocus() {
+    if (!mounted) return false;
+    if (!_focusIsEmpty) {
       _seedAttempts = 0;
-      return;
+      return true;
     }
 
-    final scope = _rootNode.nearestScope;
+    final scope = _activeScope();
     if (scope != null) {
-      // Prefer whatever this scope last had focused (route restore).
+      // Prefer whatever this scope last had focused (route restore). Note
+      // _isFocusable rejects scope nodes, so a remembered *scope* correctly
+      // falls through to the descendant search below.
       final remembered = scope.focusedChild;
       if (remembered != null && _isFocusable(remembered)) {
         remembered.requestFocus();
         _seedAttempts = 0;
-        return;
+        return true;
       }
       final candidate =
           scope.traversalDescendants.where(_isFocusable).firstOrNull;
       if (candidate != null) {
         candidate.requestFocus();
         _seedAttempts = 0;
-        return;
+        return true;
       }
     }
 
@@ -149,6 +229,7 @@ class _TVFocusScopeState extends State<TVFocusScope> {
     if (_seedAttempts++ < 40) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _seedFocus());
     }
+    return false;
   }
 
   /// Keys that prove a physical remote / D-Pad is driving the app.
@@ -179,20 +260,30 @@ class _TVFocusScopeState extends State<TVFocusScope> {
     // the remote apparently dead.
     if (_isDpadEvidence(key) && !PlatformUtils.dpadMode) {
       PlatformUtils.reportDpadKey();
-      // Focus is almost certainly empty at this point; seed it and consume
-      // this press so the next one moves.
-      if (_focusIsEmpty) {
-        _seedFocus();
+    }
+
+    // BACK on the remote. Most boxes send a system back event (PopScope
+    // handles those), but some deliver a plain key event that nothing on
+    // mobile listened for — so the user could enter a page and never leave.
+    if (DpadNavPolicy.isBackKey(key, dpadMode: PlatformUtils.dpadMode)) {
+      final handler = TVFocusScope.onBackKey;
+      if (handler != null) {
+        handler();
         return KeyEventResult.handled;
       }
     }
 
-    // Nothing focused: re-seed and consume this press so the *next* one moves.
+    // Nothing focused: re-seed so the *next* press has an origin to move from.
     // This is what turns a "dead" remote into a working one after any route
     // change that leaves the tree without focus.
+    //
+    // Only consume the press when seeding actually SUCCEEDED. Consuming
+    // unconditionally is how the remote previously went permanently dead: if
+    // the seed target was rejected (or was a scope node, which never counts as
+    // focus), every subsequent press was swallowed here and Flutter's own
+    // traversal never got a chance to run.
     if (_focusIsEmpty && _isNavigationKey(key)) {
-      _seedFocus();
-      return KeyEventResult.handled;
+      return _seedFocus() ? KeyEventResult.handled : KeyEventResult.ignored;
     }
 
     // Gamepad-style buttons some Android TV remotes emit are not in Flutter's
