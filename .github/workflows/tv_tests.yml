@@ -25,10 +25,21 @@ jobs:
             - uses: subosito/flutter-action@v2
               with:
                   channel: stable
+                  # Pin to the version pubspec.yaml requires (3.44.8), exactly
+                  # as build.yml does. Without this, `stable` resolves to a
+                  # different SDK and `pub get` fails version solving.
+                  flutter-version-file: pubspec.yaml
                   cache: true
 
             - name: Install dependencies
               run: flutter pub get
+
+            - name: Apply Patch
+              # The project patches the Flutter SDK itself (see build.yml).
+              # The local dev SDK is already patched, so CI must match or the
+              # two environments can disagree about what "passing" means.
+              shell: pwsh
+              run: lib/scripts/patch.ps1
 
             - name: Verify the TV suite is actually present
               # Guards the .gitignore trap: if these files stop being tracked,
