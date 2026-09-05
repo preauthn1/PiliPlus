@@ -150,3 +150,8 @@ pili_release.json
 dist
 
 test*
+# ...but the TV/D-Pad regression suite MUST be tracked. Without this the
+# tests never reach CI, which is how the dead-remote bug regressed three
+# times while the local suite was green.
+!test/
+!test/**

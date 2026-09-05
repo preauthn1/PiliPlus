@@ -2,6 +2,9 @@ import 'dart:async';
 import 'dart:io' show Platform;
 
 import 'package:PiliPlus/utils/device_utils.dart';
+import 'package:PiliPlus/utils/dpad_nav_policy.dart';
+import 'package:PiliPlus/utils/platform_utils.dart';
+import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/services.dart'
     show SystemChrome, MethodChannel, SystemUiOverlay, DeviceOrientation;
 
@@ -60,6 +63,25 @@ Future<void>? fullMode() {
   return _setPreferredOrientations(
     const [.portraitUp, .portraitDown, .landscapeLeft, .landscapeRight],
   );
+}
+
+/// Apply the orientation that matches the current D-Pad mode.
+///
+/// Must be callable again *after* startup: on boxes where native TV detection
+/// fails, D-Pad mode only turns on at the first real remote key press. Without
+/// re-applying, such a device stays pinned to the phone default (portraitUp)
+/// for the whole session — the picture is rotated/cropped and the D-Pad
+/// directions no longer match on-screen geometry.
+Future<void>? applyOrientationForDpadMode() {
+  if (!PlatformUtils.isMobile) return null;
+  return switch (DpadNavPolicy.orientationFor(
+    dpadMode: PlatformUtils.dpadMode,
+    horizontalScreen: Pref.horizontalScreen,
+  )) {
+    ScreenOrientationMode.landscape => landscapeLeftMode(),
+    ScreenOrientationMode.full => fullMode(),
+    ScreenOrientationMode.portrait => portraitUpMode(),
+  };
 }
 
 bool _showSystemBar = true;

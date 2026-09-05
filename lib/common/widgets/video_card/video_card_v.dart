@@ -3,6 +3,7 @@ import 'package:PiliPlus/common/widgets/badge.dart';
 import 'package:PiliPlus/common/widgets/image/image_save.dart';
 import 'package:PiliPlus/common/widgets/image/network_img_layer.dart';
 import 'package:PiliPlus/common/widgets/stat/stat.dart';
+import 'package:PiliPlus/common/widgets/tv_card.dart';
 import 'package:PiliPlus/common/widgets/video_popup_menu.dart';
 import 'package:PiliPlus/http/search.dart';
 import 'package:PiliPlus/models/home/rcmd/result.dart';
@@ -86,9 +87,10 @@ class VideoCardV extends StatelessWidget {
       cover: videoItem.cover,
       bvid: videoItem.bvid,
     );
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
+    return TVFocusHighlight(
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
         Card(
           child: InkWell(
             onTap: onPushDetail,
@@ -145,7 +147,8 @@ class VideoCardV extends StatelessWidget {
               onRemove: onRemove,
             ),
           ),
-      ],
+        ],
+      ),
     );
   }
 

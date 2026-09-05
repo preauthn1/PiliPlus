@@ -24,6 +24,7 @@ import 'package:PiliPlus/utils/font_utils.dart';
 import 'package:PiliPlus/utils/json_file_handler.dart';
 import 'package:PiliPlus/utils/max_screen_size.dart';
 import 'package:PiliPlus/utils/path_utils.dart';
+import 'package:PiliPlus/common/widgets/tv_focus_scope.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/request_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
@@ -113,9 +114,38 @@ void main() async {
   HttpOverrides.global = _CustomHttpOverrides();
 
   if (PlatformUtils.isMobile) {
-    if (Platform.isAndroid) MaxScreenSize.init();
+    if (Platform.isAndroid) {
+      MaxScreenSize.init();
+      // Re-apply orientation whenever D-Pad mode turns on. Startup decides
+      // orientation before any key can arrive, so on a box where native
+      // detection fails we would otherwise stay pinned to the phone default
+      // (portraitUp) on a landscape-only device for the whole session.
+      PlatformUtils.onDpadModeEnabled = applyOrientationForDpadMode;
+      // Some TV boxes deliver the remote's BACK button as a plain key event
+      // rather than a system back event. Reuse the app's own back handler so
+      // both paths behave identically.
+      TVFocusScope.onBackKey = _onBack;
+      // Detect Android TV. Must complete BEFORE orientation setup below,
+      // otherwise a TV would be locked to portraitUp.
+      try {
+        const platform = MethodChannel('com.example.piliplus/platform');
+        final bool isTV =
+            await platform.invokeMethod<bool>('isAndroidTV') ?? false;
+        PlatformUtils.setAndroidTV(isTV);
+        if (kDebugMode) debugPrint('Android TV detected: $isTV');
+      } catch (e) {
+        PlatformUtils.setAndroidTV(false);
+        if (kDebugMode) debugPrint('TV detection error: $e');
+      }
+      // Detection is unreliable on many boxes; honour the manual override.
+      if (Pref.forceDpadMode) {
+        PlatformUtils.setForceDpad(true);
+      }
+    }
     await Future.wait([
-      if (Pref.horizontalScreen) ?fullMode() else ?portraitUpMode(),
+      // TVs are always landscape and must never be pinned to portraitUp.
+      // Uses dpadMode so a saved manual override also applies at startup.
+      ?applyOrientationForDpadMode(),
       setupServiceLocator(),
     ]);
   } else if (Platform.isWindows) {
@@ -332,6 +362,12 @@ class MyApp extends StatelessWidget {
         onBack: _onBack,
         child: child,
       );
+    }
+    // Always mount: TVFocusScope decides internally, and must be able to
+    // observe D-Pad keys even when device detection said "not a TV".
+    // It is inert on touch devices.
+    if (PlatformUtils.isMobile) {
+      return TVFocusScope(child: child);
     }
     return child;
   }

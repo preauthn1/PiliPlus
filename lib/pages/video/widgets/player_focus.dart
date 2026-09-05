@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:PiliPlus/pages/common/common_intro_controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
+import 'package:PiliPlus/utils/dpad_nav_policy.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
@@ -33,26 +34,41 @@ class PlayerFocus extends StatelessWidget {
   final ValueGetter<bool>? onSkipSegment;
   final VoidCallback? onRefresh;
 
-  static bool _shouldHandle(LogicalKeyboardKey logicalKey) {
-    return logicalKey == LogicalKeyboardKey.tab ||
-        logicalKey == LogicalKeyboardKey.arrowLeft ||
-        logicalKey == LogicalKeyboardKey.arrowRight ||
-        logicalKey == LogicalKeyboardKey.arrowUp ||
-        logicalKey == LogicalKeyboardKey.arrowDown;
-  }
 
   @override
   Widget build(BuildContext context) {
-    return Focus(
-      autofocus: true,
-      onKeyEvent: (node, event) {
-        final handled = _handleKey(context, event);
-        if (handled || _shouldHandle(event.logicalKey)) {
-          return KeyEventResult.handled;
-        }
-        return KeyEventResult.ignored;
-      },
-      child: child,
+    // Rebuild when D-Pad mode flips mid-session (detection can fail, and the
+    // mode then turns on at the first real remote key press).
+    return ValueListenableBuilder<bool>(
+      valueListenable: PlatformUtils.dpadModeNotifier,
+      builder: (context, _, _) => Obx(() {
+        final fullScreen = plPlayerController.isFullScreen.value;
+        final dpad = PlatformUtils.dpadMode;
+        return Focus(
+          autofocus:
+              DpadNavPolicy.autofocus(dpadMode: dpad, isFullScreen: fullScreen),
+          onKeyEvent: (node, event) {
+            final key = event.logicalKey;
+            // While windowed on a remote, hand navigation keys straight back
+            // to the focus system instead of treating them as player input,
+            // otherwise the whole video page is a dead end for the remote.
+            if (dpad && !fullScreen && DpadNavPolicy.isNavKey(key)) {
+              return KeyEventResult.ignored;
+            }
+            final handled = _handleKey(context, event);
+            if (handled ||
+                DpadNavPolicy.consumesNavKey(
+                  key,
+                  dpadMode: dpad,
+                  isFullScreen: fullScreen,
+                )) {
+              return KeyEventResult.handled;
+            }
+            return KeyEventResult.ignored;
+          },
+          child: child,
+        );
+      }),
     );
   }
 
