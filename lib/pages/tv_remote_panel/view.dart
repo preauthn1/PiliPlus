@@ -1,0 +1,332 @@
+import 'package:flutter/material.dart';
+import 'package:PiliPlus/services/tv_remote_bridge.dart';
+import 'package:PiliPlus/services/tv_remote_provider.dart';
+import 'package:PiliPlus/services/tv_remote_server.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+
+/// TV Remote Control Panel
+/// Shows QR code and URL for mobile devices to connect
+class TVRemotePanel extends StatefulWidget {
+  const TVRemotePanel({super.key});
+
+  @override
+  State<TVRemotePanel> createState() => _TVRemotePanelState();
+}
+
+class _TVRemotePanelState extends State<TVRemotePanel> {
+  final _server = TVRemoteServer.instance;
+  bool _isStarting = false;
+  String? _errorMessage;
+  bool _loginEnabled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _startServer();
+  }
+
+  Future<void> _startServer() async {
+    setState(() {
+      _isStarting = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final success = await _server.start();
+      if (success) {
+        // Subscribe the executor, otherwise remote actions go nowhere.
+        TVRemoteBridge.instance.attach();
+        final provider = TVRemoteProvider.instance;
+        _server.bindProviders(
+          state: TVRemoteBridge.instance.currentState,
+          settings: provider.settingsSnapshot,
+          onSettings: provider.applySettings,
+          loginState: () => provider.loginState,
+          loginStart: provider.startQrLogin,
+          logout: provider.logout,
+          logs: provider.logsSnapshot,
+        );
+      } else {
+        setState(() {
+          _errorMessage = '启动服务失败';
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _errorMessage = '启动服务出错: $e';
+      });
+    } finally {
+      setState(() {
+        _isStarting = false;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    // Keep server running in background
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0A0D12),
+      appBar: AppBar(
+        title: const Text('手机遥控'),
+        backgroundColor: const Color(0xFF161D2B),
+      ),
+      body: _isStarting
+          ? const Center(child: CircularProgressIndicator())
+          : _errorMessage != null
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.error_outline, size: 64, color: Colors.red),
+                      const SizedBox(height: 16),
+                      Text(_errorMessage!),
+                      const SizedBox(height: 24),
+                      ElevatedButton(
+                        onPressed: _startServer,
+                        child: const Text('重试'),
+                      ),
+                    ],
+                  ),
+                )
+              : _buildContent(),
+    );
+  }
+
+  Widget _buildContent() {
+    final serverURL = _server.serverURL;
+
+    if (serverURL == null) {
+      return const Center(
+        child: Text('服务未启动'),
+      );
+    }
+
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(48),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text(
+              '使用手机扫码',
+              style: TextStyle(
+                fontSize: 32,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              '或在手机浏览器中输入以下地址',
+              style: TextStyle(
+                fontSize: 18,
+                color: Colors.white70,
+              ),
+            ),
+            const SizedBox(height: 48),
+            // QR Code
+            Container(
+              padding: const EdgeInsets.all(32),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: QrImageView(
+                data: serverURL,
+                version: QrVersions.auto,
+                size: 300,
+                backgroundColor: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 48),
+            // URL Display
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+              decoration: BoxDecoration(
+                color: const Color(0xFF161D2B),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: const Color(0xFF38BDF8).withValues(alpha: 0.3),
+                  width: 2,
+                ),
+              ),
+              child: SelectableText(
+                serverURL,
+                style: const TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF38BDF8),
+                  letterSpacing: 1.5,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            const SizedBox(height: 48),
+            // Pairing code — required by the phone to control the TV.
+            Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 48,
+                vertical: 28,
+              ),
+              decoration: BoxDecoration(
+                color: const Color(0xFF161D2B),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: const Color(0xFF4ADE80).withValues(alpha: 0.5),
+                  width: 2,
+                ),
+              ),
+              child: Column(
+                children: [
+                  const Text(
+                    '配对码',
+                    style: TextStyle(fontSize: 18, color: Colors.white70),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _server.pairingCode ?? '------',
+                    style: const TextStyle(
+                      fontSize: 44,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF4ADE80),
+                      letterSpacing: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    '在手机页面输入此配对码后即可控制',
+                    style: TextStyle(fontSize: 14, color: Colors.white54),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 48),
+            // Login consent: a paired phone still cannot bind an account
+            // until this is armed on the TV itself.
+            Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 32,
+                vertical: 20,
+              ),
+              decoration: BoxDecoration(
+                color: const Color(0xFF161D2B),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.verified_user, color: Color(0xFF38BDF8)),
+                  const SizedBox(width: 16),
+                  const Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '允许网页登录',
+                        style: TextStyle(fontSize: 20, color: Colors.white),
+                      ),
+                      SizedBox(height: 4),
+                      Text(
+                        '开启后才能用手机扫码登录 B 站账号',
+                        style: TextStyle(fontSize: 14, color: Colors.white54),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(width: 24),
+                  Switch(
+                    value: _loginEnabled,
+                    onChanged: (v) {
+                      setState(() {
+                        _loginEnabled = v;
+                        TVRemoteProvider.instance.loginEnabled = v;
+                      });
+                    },
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 48),
+            // Instructions
+            _buildInstructionCard(
+              icon: Icons.phone_android,
+              title: '1. 使用手机扫码或输入网址',
+              subtitle: '确保手机和电视在同一 WiFi 网络',
+            ),
+            const SizedBox(height: 16),
+            _buildInstructionCard(
+              icon: Icons.password,
+              title: '2. 输入电视上显示的配对码',
+              subtitle: '仅同一局域网内、且持有配对码的设备可控制',
+            ),
+            const SizedBox(height: 16),
+            _buildInstructionCard(
+              icon: Icons.settings_remote,
+              title: '3. 远程控制电视',
+              subtitle: '方向导航、播放/暂停、音量、快进快退',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInstructionCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: const Color(0xFF161D2B),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: const Color(0xFF38BDF8).withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(
+              icon,
+              color: const Color(0xFF38BDF8),
+              size: 28,
+            ),
+          ),
+          const SizedBox(width: 20),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Colors.white60,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

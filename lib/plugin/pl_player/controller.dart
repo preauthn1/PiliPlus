@@ -36,6 +36,7 @@ import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/asset_utils.dart';
 import 'package:PiliPlus/utils/device_utils.dart';
+import 'package:PiliPlus/utils/dpad_nav_policy.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/extension/box_ext.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
@@ -1532,11 +1533,17 @@ class PlPlayerController with BlockConfigMixin {
   bool get isCloseAll => _isCloseAll;
 
   Future<void>? resetScreenRotation() {
-    if (horizontalScreen) {
-      return fullMode();
-    } else {
-      return portraitUpMode();
-    }
+    // On a remote, exiting a video must NOT re-permit portrait: fullMode()
+    // allows all four orientations, which let a TV rotate to portrait after
+    // every video and broke the on-screen geometry the D-Pad navigates by.
+    return switch (DpadNavPolicy.resetOrientationFor(
+      dpadMode: PlatformUtils.dpadMode,
+      horizontalScreen: horizontalScreen,
+    )) {
+      ScreenOrientationMode.landscape => landscapeLeftMode(),
+      ScreenOrientationMode.full => fullMode(),
+      ScreenOrientationMode.portrait => portraitUpMode(),
+    };
   }
 
   void onCloseAll() {

@@ -7,6 +7,7 @@ import 'package:PiliPlus/common/widgets/custom_toast.dart';
 import 'package:PiliPlus/common/widgets/route_aware_mixin.dart';
 import 'package:PiliPlus/common/widgets/scale_app.dart';
 import 'package:PiliPlus/common/widgets/scroll_behavior.dart';
+import 'package:PiliPlus/common/widgets/tv_focus_scope.dart';
 import 'package:PiliPlus/http/init.dart';
 import 'package:PiliPlus/models/common/theme/theme_color_type.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
@@ -112,9 +113,38 @@ void main() async {
   HttpOverrides.global = _CustomHttpOverrides();
 
   if (PlatformUtils.isMobile) {
-    if (Platform.isAndroid) MaxScreenSize.init();
+    if (Platform.isAndroid) {
+      MaxScreenSize.init();
+      // Re-apply orientation whenever D-Pad mode turns on. Startup decides
+      // orientation before any key can arrive, so on a box where native
+      // detection fails we would otherwise stay pinned to the phone default
+      // (portraitUp) on a landscape-only device for the whole session.
+      PlatformUtils.onDpadModeEnabled = applyOrientationForDpadMode;
+      // Some TV boxes deliver the remote's BACK button as a plain key event
+      // rather than a system back event. Reuse the app's own back handler so
+      // both paths behave identically.
+      TVFocusScope.onBackKey = MyApp.handleBack;
+      // Detect Android TV. Must complete BEFORE orientation setup below,
+      // otherwise a TV would be locked to portraitUp.
+      try {
+        const platform = MethodChannel('com.example.piliplus/platform');
+        final bool isTV =
+            await platform.invokeMethod<bool>('isAndroidTV') ?? false;
+        PlatformUtils.setAndroidTV(isTV);
+        if (kDebugMode) debugPrint('Android TV detected: $isTV');
+      } catch (e) {
+        PlatformUtils.setAndroidTV(false);
+        if (kDebugMode) debugPrint('TV detection error: $e');
+      }
+      // Detection is unreliable on many boxes; honour the manual override.
+      if (Pref.forceDpadMode) {
+        PlatformUtils.setForceDpad(true);
+      }
+    }
     await Future.wait([
-      if (Pref.horizontalScreen) ?fullMode() else ?portraitUpMode(),
+      // TVs are always landscape and must never be pinned to portraitUp.
+      // Uses dpadMode so a saved manual override also applies at startup.
+      ?applyOrientationForDpadMode(),
       setupServiceLocator(),
     ]);
   } else if (Platform.isWindows) {
@@ -216,6 +246,13 @@ class MyApp extends StatelessWidget {
 
   static ColorScheme? _light, _dark;
 
+  /// The app's single back-navigation entry point.
+  ///
+  /// Shared by the desktop [BackDetector], the TV remote's BACK key
+  /// ([TVFocusScope.onBackKey]) and the system back button, so the three
+  /// cannot drift apart.
+  static void handleBack() => _onBack();
+
   static void _onBack() {
     if (SmartDialog.checkExist()) {
       SmartDialog.dismiss();
@@ -259,6 +296,15 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Rebuild the whole app (and therefore the theme, which bakes in
+    // focusColor) when D-Pad mode flips on after a remote key is detected.
+    return ValueListenableBuilder<bool>(
+      valueListenable: PlatformUtils.dpadModeNotifier,
+      builder: (context, _, _) => _buildApp(),
+    );
+  }
+
+  Widget _buildApp() {
     final (light, dark) = getAllTheme();
     return GetMaterialApp(
       title: Constants.appName,
@@ -325,6 +371,12 @@ class MyApp extends StatelessWidget {
         onBack: _onBack,
         child: child,
       );
+    }
+    // Always mount: TVFocusScope decides internally, and must be able to
+    // observe D-Pad keys even when device detection said "not a TV".
+    // It is inert on touch devices.
+    if (PlatformUtils.isMobile) {
+      return TVFocusScope(child: child);
     }
     return child;
   }

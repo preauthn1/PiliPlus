@@ -1,5 +1,6 @@
 import 'package:PiliPlus/common/style.dart';
 import 'package:PiliPlus/utils/extension/theme_ext.dart';
+import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/cupertino.dart' show CupertinoThemeData;
 import 'package:flutter/foundation.dart' show PlatformDispatcher;
@@ -42,6 +43,15 @@ abstract final class ThemeUtils {
     ThemeData theme = ThemeData(
       useMaterial3: true,
       colorScheme: colorScheme,
+      // On TV the only feedback a user gets is the focus highlight, so make
+      // it strong and always-on. Without this every InkWell-based card is
+      // focusable but visually indistinguishable, which reads as "the remote
+      // does nothing".
+      // Follows dpadMode, not raw detection: on boxes where detection fails
+      // the highlight must still appear once a D-Pad key is seen.
+      focusColor: PlatformUtils.dpadMode
+          ? colorScheme.primary.withValues(alpha: 0.32)
+          : null,
       textTheme: fontWeight == null
           ? null
           : TextTheme(
