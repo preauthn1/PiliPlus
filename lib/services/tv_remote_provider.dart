@@ -122,7 +122,7 @@ class TVRemoteProvider {
       tokenInfo['access_token'],
       tokenInfo['refresh_token'],
     );
-    await Future.wait([account.onChange(), AnonymousAccount().delete()]);
+    await Future.wait([?account.onChange(), AnonymousAccount().delete()]);
     for (int i = 0; i < AccountType.values.length; i++) {
       if (Accounts.accountMode[i].mid == account.mid) {
         Accounts.accountMode[i] = account;
